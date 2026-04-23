@@ -1,0 +1,267 @@
+import { randomUUID } from "node:crypto";
+import {
+  Analyzer,
+  Project,
+  ProjectMemory,
+  Session,
+  SessionMessage,
+  SessionReport,
+} from "../domain/types.js";
+import { JsonStore } from "../storage/jsonStore.js";
+
+interface CreateProjectInput {
+  name: string;
+  description?: string;
+}
+
+export class BrainstormingEngine {
+  constructor(
+    private readonly store: JsonStore,
+    private readonly analyzer: Analyzer,
+  ) {}
+
+  async createProject(scopeId: string, input: CreateProjectInput): Promise<Project> {
+    return this.store.update((state) => {
+      const now = new Date().toISOString();
+      const project: Project = {
+        id: randomUUID(),
+        scopeId,
+        name: input.name.trim(),
+        description: input.description?.trim(),
+        createdAt: now,
+        updatedAt: now,
+      };
+      state.projects.push(project);
+      if (!state.scopes[scopeId]) {
+        state.scopes[scopeId] = {};
+      }
+      if (!state.scopes[scopeId].activeProjectId) {
+        state.scopes[scopeId].activeProjectId = project.id;
+      }
+      return project;
+    });
+  }
+
+  async listProjects(scopeId: string): Promise<Project[]> {
+    const state = await this.store.read();
+    return state.projects.filter((project) => project.scopeId === scopeId);
+  }
+
+  async selectProject(scopeId: string, projectId: string): Promise<void> {
+    await this.store.update((state) => {
+      const project = state.projects.find(
+        (candidate) => candidate.id === projectId && candidate.scopeId === scopeId,
+      );
+      if (!project) {
+        throw new Error("Project not found in this scope.");
+      }
+      if (!state.scopes[scopeId]) {
+        state.scopes[scopeId] = {};
+      }
+      state.scopes[scopeId].activeProjectId = project.id;
+      project.updatedAt = new Date().toISOString();
+    });
+  }
+
+  async getActiveProject(scopeId: string): Promise<Project | undefined> {
+    const state = await this.store.read();
+    const activeProjectId = state.scopes[scopeId]?.activeProjectId;
+    return state.projects.find((project) => project.id === activeProjectId);
+  }
+
+  async attachRepo(scopeId: string, projectId: string, linkedRepoUrl: string): Promise<void> {
+    await this.store.update((state) => {
+      const project = state.projects.find(
+        (candidate) => candidate.id === projectId && candidate.scopeId === scopeId,
+      );
+      if (!project) {
+        throw new Error("Project not found in this scope.");
+      }
+      project.linkedRepoUrl = linkedRepoUrl;
+      project.updatedAt = new Date().toISOString();
+    });
+  }
+
+  async startSession(scopeId: string, channelId: string, startedBy: string): Promise<Session> {
+    return this.store.update((state) => {
+      const activeProjectId = state.scopes[scopeId]?.activeProjectId;
+      if (!activeProjectId) {
+        throw new Error("No active project selected.");
+      }
+
+      const duplicate = state.sessions.find(
+        (session) =>
+          session.scopeId === scopeId &&
+          session.projectId === activeProjectId &&
+          session.channelId === channelId &&
+          session.status === "active",
+      );
+      if (duplicate) {
+        throw new Error("An active session already exists for this project and channel.");
+      }
+
+      const session: Session = {
+        id: randomUUID(),
+        scopeId,
+        projectId: activeProjectId,
+        channelId,
+        startedBy,
+        startedAt: new Date().toISOString(),
+        status: "active",
+        repoUsedFlag: false,
+      };
+      state.sessions.push(session);
+      return session;
+    });
+  }
+
+  async captureMessage(
+    scopeId: string,
+    channelId: string,
+    authorId: string,
+    content: string,
+  ): Promise<SessionMessage | undefined> {
+    if (!content.trim()) {
+      return undefined;
+    }
+
+    return this.store.update((state) => {
+      const activeProjectId = state.scopes[scopeId]?.activeProjectId;
+      if (!activeProjectId) {
+        return undefined;
+      }
+      const session = state.sessions.find(
+        (candidate) =>
+          candidate.scopeId === scopeId &&
+          candidate.channelId === channelId &&
+          candidate.projectId === activeProjectId &&
+          candidate.status === "active",
+      );
+      if (!session) {
+        return undefined;
+      }
+
+      const message: SessionMessage = {
+        id: randomUUID(),
+        sessionId: session.id,
+        authorId,
+        content: content.trim(),
+        timestamp: new Date().toISOString(),
+      };
+      state.messages.push(message);
+      return message;
+    });
+  }
+
+  async endSession(scopeId: string, channelId: string): Promise<SessionReport> {
+    const state = await this.store.read();
+    const activeProjectId = state.scopes[scopeId]?.activeProjectId;
+    if (!activeProjectId) {
+      throw new Error("No active project selected.");
+    }
+
+    const session = state.sessions.find(
+      (candidate) =>
+        candidate.scopeId === scopeId &&
+        candidate.channelId === channelId &&
+        candidate.projectId === activeProjectId &&
+        candidate.status === "active",
+    );
+    if (!session) {
+      throw new Error("No active session found for this channel.");
+    }
+
+    const project = state.projects.find((candidate) => candidate.id === session.projectId);
+    if (!project) {
+      throw new Error("Project not found for active session.");
+    }
+
+    const messages = state.messages.filter((message) => message.sessionId === session.id);
+    const memories = state.memories.filter((memory) => memory.projectId === project.id);
+    const analysis = await this.analyzer.analyze({
+      project,
+      session,
+      messages,
+      relevantPastContext: memories,
+    });
+
+    return this.store.update((mutableState) => {
+      const activeSession = mutableState.sessions.find((candidate) => candidate.id === session.id);
+      if (!activeSession) {
+        throw new Error("Session not found during finalization.");
+      }
+      activeSession.status = "ended";
+      activeSession.endedAt = new Date().toISOString();
+
+      const report: SessionReport = {
+        id: randomUUID(),
+        sessionId: session.id,
+        ...analysis,
+      };
+      mutableState.reports.push(report);
+
+      const memory: ProjectMemory = {
+        id: randomUUID(),
+        projectId: project.id,
+        memoryType: "session_summary",
+        content: [
+          `Goal: ${report.sessionGoal}`,
+          `Strongest: ${report.strongestIdeas.join("; ")}`,
+          `Concerns: ${report.weakPointsConcerns.join("; ")}`,
+          `Missing: ${report.missingQuestions.join("; ")}`,
+        ].join(" | "),
+        sourceSessionId: session.id,
+        createdAt: new Date().toISOString(),
+      };
+      mutableState.memories.push(memory);
+      return report;
+    });
+  }
+
+  async getProjectMemory(projectId: string): Promise<ProjectMemory[]> {
+    const state = await this.store.read();
+    return state.memories.filter((memory) => memory.projectId === projectId);
+  }
+
+  async getActiveSession(scopeId: string, channelId: string): Promise<Session | undefined> {
+    const state = await this.store.read();
+    const activeProjectId = state.scopes[scopeId]?.activeProjectId;
+    if (!activeProjectId) {
+      return undefined;
+    }
+    return state.sessions.find(
+      (session) =>
+        session.scopeId === scopeId &&
+        session.channelId === channelId &&
+        session.projectId === activeProjectId &&
+        session.status === "active",
+    );
+  }
+
+  async deleteProject(scopeId: string, projectId: string): Promise<void> {
+    await this.store.update((state) => {
+      const before = state.projects.length;
+      state.projects = state.projects.filter(
+        (project) => !(project.id === projectId && project.scopeId === scopeId),
+      );
+      if (state.projects.length === before) {
+        throw new Error("Project not found in this scope.");
+      }
+
+      const removedSessionIds = new Set(
+        state.sessions
+          .filter((session) => session.projectId === projectId)
+          .map((session) => session.id),
+      );
+      state.sessions = state.sessions.filter((session) => session.projectId !== projectId);
+      state.messages = state.messages.filter((message) => !removedSessionIds.has(message.sessionId));
+      state.memories = state.memories.filter((memory) => memory.projectId !== projectId);
+      state.reports = state.reports.filter((report) => !removedSessionIds.has(report.sessionId));
+
+      if (state.scopes[scopeId]?.activeProjectId === projectId) {
+        const replacement = state.projects.find((project) => project.scopeId === scopeId);
+        state.scopes[scopeId].activeProjectId = replacement?.id;
+      }
+    });
+  }
+}
