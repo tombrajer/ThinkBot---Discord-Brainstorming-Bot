@@ -2,21 +2,80 @@ import { z } from "zod";
 import { AnalysisInput, Analyzer, SessionReport } from "../domain/types.js";
 import { parseModelJson } from "./modelJsonParser.js";
 
+const coerceToString = (value: unknown): string => {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    const first = value
+      .map((item) => coerceToString(item).trim())
+      .find((item) => item.length > 0);
+    return first ?? "";
+  }
+  return "";
+};
+
+const coerceToStringArray = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => coerceToString(item).trim())
+      .filter(Boolean);
+  }
+
+  const single = coerceToString(value).trim();
+  return single ? [single] : [];
+};
+
 const reportSchema = z.object({
-  sessionGoal: z.string(),
-  mainIdeasRaised: z.array(z.string()).default([]),
-  patternsThemes: z.array(z.string()).default([]),
-  strongestIdeas: z.array(z.string()).default([]),
-  weakPointsConcerns: z.array(z.string()).default([]),
-  missingQuestions: z.array(z.string()).default([]),
-  suggestions: z.array(z.string()).default([]),
-  relevantPastContext: z.array(z.string()).default([]),
-  repoObservations: z.array(z.string()).default([]),
+  sessionGoal: z.preprocess((value) => coerceToString(value), z.string()),
+  mainIdeasRaised: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  patternsThemes: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  strongestIdeas: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  weakPointsConcerns: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  missingQuestions: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  suggestions: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  relevantPastContext: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  repoObservations: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
 });
 
 const ensureNonEmpty = (items: string[], fallback: string): string[] => {
   const cleaned = items.map((item) => item.trim()).filter(Boolean);
   return cleaned.length > 0 ? cleaned : [fallback];
+};
+
+const toNormalizedLines = (content: string): string[] =>
+  content
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*[-*\d.)]+\s*/, "").trim())
+    .filter(Boolean);
+
+const buildReportFromPlainText = (content: string): Omit<SessionReport, "id" | "sessionId"> => {
+  const lines = toNormalizedLines(content);
+  const first = lines[0] ?? "No clear goal captured.";
+  const suggestions = lines
+    .filter((line) => /\b(suggest|recommend|next|should|action|todo)\b/i.test(line))
+    .slice(0, 4);
+
+  return {
+    sessionGoal: first,
+    mainIdeasRaised: ensureNonEmpty(lines.slice(0, 5), "No clear ideas were captured."),
+    patternsThemes: ensureNonEmpty(lines.slice(0, 3), "No clear themes identified."),
+    strongestIdeas: ensureNonEmpty(
+      [lines[0] ?? ""],
+      "Identify one concrete idea worth validating next.",
+    ),
+    weakPointsConcerns: ["Model response was non-JSON; concerns were inferred from plain text."],
+    missingQuestions: ["What is the narrowest user problem this project must solve first?"],
+    suggestions: ensureNonEmpty(
+      suggestions,
+      "Pick one MVP flow and define success metrics before implementation.",
+    ),
+    relevantPastContext: ["No prior project memory found yet."],
+    repoObservations: [],
+  };
 };
 
 const normalizeReport = (
@@ -50,12 +109,90 @@ const normalizeReport = (
   };
 };
 
+const withFallbackNotice = (
+  report: Omit<SessionReport, "id" | "sessionId">,
+  reason: string,
+): Omit<SessionReport, "id" | "sessionId"> => {
+  const prefix = "[Fallback: Ollama failed]";
+  const details = reason.trim() || "Unknown error";
+
+  return {
+    ...report,
+    sessionGoal: `${prefix} ${report.sessionGoal}`.trim(),
+    weakPointsConcerns: ensureNonEmpty(
+      [`Ollama analysis failed. Reason: ${details}`, ...report.weakPointsConcerns],
+      "Key risks were not clearly discussed in this session.",
+    ),
+    suggestions: ensureNonEmpty(
+      [
+        "Review Ollama logs and bot console output for the exact failure cause.",
+        ...report.suggestions,
+      ],
+      "Pick one MVP flow and define success metrics before implementation.",
+    ),
+  };
+};
+
 interface OllamaAnalyzerOptions {
   baseUrl: string;
   model: string;
   timeoutMs: number;
   fallbackAnalyzer: Analyzer;
 }
+
+const extractModelContent = (payload: unknown): string => {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  const root = payload as Record<string, unknown>;
+
+  const rootResponse = root.response;
+  if (typeof rootResponse === "string" && rootResponse.trim()) {
+    return rootResponse;
+  }
+
+  const outputText = root.output_text;
+  if (typeof outputText === "string" && outputText.trim()) {
+    return outputText;
+  }
+
+  const message = root.message;
+  if (!message || typeof message !== "object") {
+    return "";
+  }
+
+  const msg = message as Record<string, unknown>;
+  const directFields = ["content", "response", "text"];
+  for (const field of directFields) {
+    const value = msg[field];
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+
+  const contentParts = msg.content;
+  if (Array.isArray(contentParts)) {
+    const joined = contentParts
+      .map((part) => {
+        if (typeof part === "string") {
+          return part;
+        }
+        if (part && typeof part === "object") {
+          const text = (part as Record<string, unknown>).text;
+          return typeof text === "string" ? text : "";
+        }
+        return "";
+      })
+      .join("\n")
+      .trim();
+    if (joined) {
+      return joined;
+    }
+  }
+
+  return "";
+};
 
 const withNoTrailingSlash = (value: string): string => value.replace(/\/+$/, "");
 
@@ -126,7 +263,8 @@ export class OllamaAnalyzer implements Analyzer {
       console.warn(
         `[ollama] Falling back to heuristic analyzer after ${elapsedMs}ms: ${message}`,
       );
-      return this.options.fallbackAnalyzer.analyze(input);
+      const fallbackReport = await this.options.fallbackAnalyzer.analyze(input);
+      return withFallbackNotice(fallbackReport, message);
     }
   }
 
@@ -138,55 +276,134 @@ export class OllamaAnalyzer implements Analyzer {
     let requestStatus = "ok";
 
     try {
-      const response = await fetch(`${baseUrl}/api/chat`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      const userPrompt = this.buildPrompt(input);
+      const requestBase = {
+        model: this.options.model,
+        stream: false,
+        keep_alive: "30m",
+        options: {
+          temperature: 0.2,
+          num_predict: 450,
         },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: this.options.model,
-          format: "json",
-          stream: false,
-          keep_alive: "30m",
-          options: {
-            temperature: 0.2,
-            num_predict: 450,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "You summarize brainstorming sessions for a Discord bot.",
+              "Respond with exactly one JSON object and no markdown.",
+              "Do not include code fences, labels, or commentary outside JSON.",
+              "Keep each list item short, practical, and specific.",
+            ].join(" "),
           },
-          messages: [
-            {
-              role: "system",
-              content: [
-                "You summarize brainstorming sessions for a Discord bot.",
-                "Respond with exactly one JSON object and no markdown.",
-                "Do not include code fences, labels, or commentary outside JSON.",
-                "Keep each list item short, practical, and specific.",
-              ].join(" "),
-            },
-            {
-              role: "user",
-              content: this.buildPrompt(input),
-            },
-          ],
-        }),
-      });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw formatHttpError(response.status, errorBody, this.options.model);
-      }
-
-      const payload = (await response.json()) as {
-        message?: {
-          content?: string;
-        };
+          {
+            role: "user",
+            content: userPrompt,
+          },
+        ],
       };
-      const content = payload.message?.content;
-      if (!content?.trim()) {
-        throw new Error("Ollama returned an empty response.");
+
+      const requestChatOnce = async (
+        requestBody: object,
+      ): Promise<{ content: string; payload: unknown }> => {
+        const response = await fetch(`${baseUrl}/api/chat`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify(requestBody),
+        });
+
+        if (!response.ok) {
+          const errorBody = await response.text();
+          throw formatHttpError(response.status, errorBody, this.options.model);
+        }
+
+        const payload = (await response.json()) as unknown;
+        const content = extractModelContent(payload).trim();
+        return { content, payload };
+      };
+
+      const requestGenerateOnce = async (): Promise<{ content: string; payload: unknown }> => {
+        const response = await fetch(`${baseUrl}/api/generate`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            model: this.options.model,
+            prompt: userPrompt,
+            stream: false,
+            keep_alive: "30m",
+            options: {
+              temperature: 0.2,
+              num_predict: 450,
+            },
+            format: "json",
+          }),
+        });
+
+        if (!response.ok) {
+          const errorBody = await response.text();
+          throw formatHttpError(response.status, errorBody, this.options.model);
+        }
+
+        const payload = (await response.json()) as unknown;
+        const root = payload && typeof payload === "object"
+          ? (payload as Record<string, unknown>)
+          : undefined;
+        const responseText = typeof root?.response === "string" ? root.response.trim() : "";
+        return { content: responseText, payload };
+      };
+
+      let { content, payload } = await requestChatOnce({ ...requestBase, format: "json" });
+
+      if (!content) {
+        console.warn(
+          "[ollama] Received empty content from /api/chat with format=json; retrying once without format.",
+        );
+        ({ content, payload } = await requestChatOnce(requestBase));
       }
 
-      return parseModelJson(content);
+      if (!content) {
+        console.warn(
+          "[ollama] Received empty content from /api/chat retries; attempting /api/generate fallback.",
+        );
+        ({ content, payload } = await requestGenerateOnce());
+      }
+
+      if (!content) {
+        const payloadKeys =
+          payload && typeof payload === "object"
+            ? Object.keys(payload as Record<string, unknown>).join(", ")
+            : "(non-object payload)";
+        throw new Error(`Ollama returned an empty response. Payload keys: ${payloadKeys || "(none)"}`);
+      }
+
+      const rawPreview = content.replace(/\s+/g, " ").slice(0, 240);
+      console.info(`[ollama] Raw response preview: ${rawPreview}`);
+
+      try {
+        const parsed = parseModelJson(content);
+        let parsedPreview = "";
+        try {
+          parsedPreview = JSON.stringify(parsed).replace(/\s+/g, " ").slice(0, 240);
+        } catch {
+          parsedPreview = "(unable to serialize parsed preview)";
+        }
+        console.info(`[ollama] Parsed response preview: ${parsedPreview}`);
+        return parsed;
+      } catch (parseError) {
+        const message = parseError instanceof Error ? parseError.message : "Unknown parse error";
+        console.warn(
+          `[ollama] JSON parse failed, using plain-text salvage path. reason=${message}`,
+        );
+        const salvaged = buildReportFromPlainText(content);
+        const salvagedPreview = JSON.stringify(salvaged).replace(/\s+/g, " ").slice(0, 240);
+        console.info(`[ollama] Salvaged response preview: ${salvagedPreview}`);
+        return salvaged;
+      }
     } catch (error) {
       requestStatus = "error";
       throw formatRequestError(error, baseUrl, this.options.timeoutMs);

@@ -3,6 +3,53 @@ import { BrainstormingEngine } from "../core/brainstormingEngine.js";
 import { formatReport } from "../report/formatReport.js";
 
 const scopeFor = (guildId: string | null, userId: string): string => guildId ?? `dm:${userId}`;
+const MAX_DISCORD_CONTENT_LENGTH = 2_000;
+
+const chunkMessage = (content: string, maxLength = MAX_DISCORD_CONTENT_LENGTH): string[] => {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return ["(empty report)"];
+  }
+  if (trimmed.length <= maxLength) {
+    return [trimmed];
+  }
+
+  const chunks: string[] = [];
+  let current = "";
+
+  const pushCurrent = () => {
+    if (current.trim()) {
+      chunks.push(current.trim());
+      current = "";
+    }
+  };
+
+  const appendLine = (line: string) => {
+    const next = current ? `${current}\n${line}` : line;
+    if (next.length <= maxLength) {
+      current = next;
+      return;
+    }
+
+    if (line.length <= maxLength) {
+      pushCurrent();
+      current = line;
+      return;
+    }
+
+    pushCurrent();
+    for (let i = 0; i < line.length; i += maxLength) {
+      chunks.push(line.slice(i, i + maxLength));
+    }
+  };
+
+  for (const line of trimmed.split(/\r?\n/)) {
+    appendLine(line);
+  }
+  pushCurrent();
+
+  return chunks.length > 0 ? chunks : [trimmed.slice(0, maxLength)];
+};
 
 interface DiscordBotOptions {
   enableMessageContentIntent: boolean;
@@ -115,9 +162,46 @@ export const createDiscordBot = (
       }
 
       if (interaction.commandName === "end-session") {
+        const startMs = Date.now();
+        console.info(
+          `[discord] /end-session start scope=${scopeId} channel=${interaction.channelId} user=${interaction.user.id}`,
+        );
         await interaction.deferReply();
+        console.info("[discord] /end-session deferred interaction successfully");
+
         const report = await engine.endSession(scopeId, interaction.channelId);
-        await interaction.editReply(formatReport(report));
+        const formatted = formatReport(report);
+        const contentChunks = chunkMessage(formatted);
+
+        console.info(
+          `[discord] /end-session prepared ${contentChunks.length} chunk(s), firstChunkLength=${contentChunks[0]?.length ?? 0}`,
+        );
+
+        try {
+          await interaction.editReply("Analysis complete. Sending report...");
+          console.info("[discord] /end-session editReply status message sent");
+        } catch (sendError) {
+          const msg = sendError instanceof Error ? sendError.message : String(sendError);
+          console.error(`[discord] /end-session editReply failed: ${msg}`);
+          throw sendError;
+        }
+
+        for (let index = 0; index < contentChunks.length; index += 1) {
+          const chunk = contentChunks[index];
+          try {
+            await interaction.followUp(chunk);
+            console.info(
+              `[discord] /end-session followUp sent chunk=${index + 1}/${contentChunks.length} length=${chunk.length}`,
+            );
+          } catch (sendError) {
+            const msg = sendError instanceof Error ? sendError.message : String(sendError);
+            console.error(
+              `[discord] /end-session followUp failed chunk=${index + 1}/${contentChunks.length}: ${msg}`,
+            );
+            throw sendError;
+          }
+        }
+        console.info(`[discord] /end-session completed in ${Date.now() - startMs}ms`);
         return;
       }
 
@@ -131,7 +215,11 @@ export const createDiscordBot = (
           memory.length === 0
             ? "No memory entries yet."
             : memory.slice(-10).map((item) => `- ${item.content}`).join("\n");
-        await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+        const contentChunks = chunkMessage(content);
+        await interaction.reply({ content: contentChunks[0], flags: MessageFlags.Ephemeral });
+        for (let index = 1; index < contentChunks.length; index += 1) {
+          await interaction.followUp({ content: contentChunks[index], flags: MessageFlags.Ephemeral });
+        }
         return;
       }
 
@@ -145,6 +233,9 @@ export const createDiscordBot = (
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
+      console.error(
+        `[discord] Interaction handler exception command=${interaction.commandName} scope=${scopeId} channel=${interaction.channelId}: ${message}`,
+      );
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp({ content: `Error: ${message}`, flags: MessageFlags.Ephemeral });
       } else {

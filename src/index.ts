@@ -5,42 +5,71 @@ import { createDiscordBot } from "./discord/bot.js";
 import { HeuristicAnalyzer } from "./analysis/heuristicAnalyzer.js";
 import { OllamaAnalyzer } from "./analysis/ollamaAnalyzer.js";
 import { validateOllamaHealth } from "./analysis/ollamaHealth.js";
+import { Analyzer } from "./domain/types.js";
 import { JsonStore } from "./storage/jsonStore.js";
 
 const start = async () => {
   const config = readConfig();
   const store = new JsonStore(resolve(config.DATA_FILE));
   const heuristicAnalyzer = new HeuristicAnalyzer();
-  let analyzer = heuristicAnalyzer;
+  let analyzer: Analyzer = heuristicAnalyzer;
 
   if (config.ANALYZER_PROVIDER === "ollama") {
     console.info(
       `[ollama] Configuration baseUrl=${config.OLLAMA_BASE_URL} model=${config.OLLAMA_MODEL} timeoutMs=${config.OLLAMA_TIMEOUT_MS}`,
     );
+    analyzer = new OllamaAnalyzer({
+      baseUrl: config.OLLAMA_BASE_URL,
+      model: config.OLLAMA_MODEL,
+      timeoutMs: config.OLLAMA_TIMEOUT_MS,
+      fallbackAnalyzer: heuristicAnalyzer,
+    });
     try {
       await validateOllamaHealth({
         baseUrl: config.OLLAMA_BASE_URL,
         model: config.OLLAMA_MODEL,
         timeoutMs: config.OLLAMA_TIMEOUT_MS,
       });
-      analyzer = new OllamaAnalyzer({
-        baseUrl: config.OLLAMA_BASE_URL,
-        model: config.OLLAMA_MODEL,
-        timeoutMs: config.OLLAMA_TIMEOUT_MS,
-        fallbackAnalyzer: heuristicAnalyzer,
-      });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown Ollama error.";
-      console.warn(`[ollama] Startup health check failed. Falling back to heuristic analyzer. ${message}`);
+      console.warn(
+        `[ollama] Startup health check failed. Continuing with Ollama analyzer and per-request fallback. ${message}`,
+      );
     }
   }
 
   const engine = new BrainstormingEngine(store, analyzer);
 
-  const bot = createDiscordBot(engine, {
-    enableMessageContentIntent: config.ENABLE_MESSAGE_CONTENT_INTENT,
-  });
-  await bot.login(config.DISCORD_TOKEN);
+  const createBot = (enableMessageContentIntent: boolean) =>
+    createDiscordBot(engine, {
+      enableMessageContentIntent,
+    });
+
+  let bot = createBot(config.ENABLE_MESSAGE_CONTENT_INTENT);
+  try {
+    await bot.login(config.DISCORD_TOKEN);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const canRetryWithoutIntent =
+      config.ENABLE_MESSAGE_CONTENT_INTENT && message.includes("Used disallowed intents");
+
+    if (!canRetryWithoutIntent) {
+      throw error;
+    }
+
+    console.warn(
+      [
+        "[discord] Message Content Intent is disallowed for this application.",
+        "Retrying without message content intent.",
+        "Session capture from regular channel messages will be disabled.",
+        "Enable Message Content Intent in the Discord Developer Portal to restore full capture.",
+      ].join(" "),
+    );
+
+    bot.destroy();
+    bot = createBot(false);
+    await bot.login(config.DISCORD_TOKEN);
+  }
 };
 
 start().catch((error) => {
