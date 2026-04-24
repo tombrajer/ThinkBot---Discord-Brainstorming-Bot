@@ -115,8 +115,9 @@ export const createDiscordBot = (
       }
 
       if (interaction.commandName === "end-session") {
+        await interaction.deferReply();
         const report = await engine.endSession(scopeId, interaction.channelId);
-        await interaction.reply(formatReport(report));
+        await interaction.editReply(formatReport(report));
         return;
       }
 

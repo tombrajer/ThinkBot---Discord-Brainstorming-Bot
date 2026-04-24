@@ -33,6 +33,19 @@ copy .env.example .env
 ```
 Fill in `DISCORD_TOKEN` and `DISCORD_CLIENT_ID`.
 
+For local AI analysis with Ollama (default):
+```bash
+OLLAMA_MODEL=qwen3:8b
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+ANALYZER_PROVIDER=ollama
+OLLAMA_TIMEOUT_MS=180000
+```
+
+If you need to force the old rule-based analyzer:
+```bash
+ANALYZER_PROVIDER=heuristic
+```
+
 If you want the bot to capture regular channel messages during sessions, set:
 ```bash
 ENABLE_MESSAGE_CONTENT_INTENT=true
@@ -55,6 +68,14 @@ npm run dev
 - Tests:
 ```bash
 npm test
+```
+
+- Live local-model connectivity test (optional):
+```powershell
+$env:RUN_OLLAMA_LIVE='true'
+$env:OLLAMA_BASE_URL='http://127.0.0.1:11434'
+$env:OLLAMA_MODEL='qwen3:8b'
+npm run test:ollama-live
 ```
 
 - Typecheck/build:
