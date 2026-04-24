@@ -8,6 +8,7 @@ const defaultState = (): StoreState => ({
   messages: [],
   memories: [],
   reports: [],
+  clarifyRuns: {},
   scopes: {},
 });
 
@@ -24,7 +25,18 @@ export class JsonStore {
       return defaultState();
     }
 
-    return JSON.parse(raw) as StoreState;
+    const parsed = JSON.parse(raw) as Partial<StoreState>;
+    return {
+      ...defaultState(),
+      ...parsed,
+      projects: parsed.projects ?? [],
+      sessions: parsed.sessions ?? [],
+      messages: parsed.messages ?? [],
+      memories: parsed.memories ?? [],
+      reports: parsed.reports ?? [],
+      clarifyRuns: parsed.clarifyRuns ?? {},
+      scopes: parsed.scopes ?? {},
+    };
   }
 
   async write(state: StoreState): Promise<void> {

@@ -46,6 +46,93 @@ const ensureNonEmpty = (items: string[], fallback: string): string[] => {
   return cleaned.length > 0 ? cleaned : [fallback];
 };
 
+const toTitleCase = (value: string): string =>
+  value
+    .trim()
+    .replace(/\s+/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+
+const pickTopic = (candidates: string[], fallback: string): string => {
+  const topic = candidates
+    .map((candidate) => candidate.trim())
+    .find((candidate) => candidate.length > 2);
+  return topic ? toTitleCase(topic.slice(0, 72)) : fallback;
+};
+
+const isStructuredSuggestion = (value: string): boolean =>
+  /Idea:/i.test(value) &&
+  /Features:/i.test(value) &&
+  /Implementation:/i.test(value) &&
+  /Creative twist:/i.test(value);
+
+const toDetailedSuggestion = (seed: string, topic: string): string => {
+  const cleanedSeed = seed.replace(/\s+/g, " ").trim();
+  const idea = cleanedSeed.length > 12
+    ? cleanedSeed.replace(/^idea:\s*/i, "").slice(0, 150)
+    : `Build a focused "${topic}" loop`;
+  return [
+    `Idea: ${idea}.`,
+    `Features: clear user trigger, guided step-by-step flow, and a visible output artifact users can refine.`,
+    `Implementation: add one command path, persist per-project state, and wire concise status updates so each action has a measurable result.`,
+    `Creative twist: include a randomized challenge mode that reframes the same idea from a different user persona each run.`,
+  ].join(" ");
+};
+
+const ensureDetailedSuggestions = (
+  suggestions: string[],
+  contextTopics: string[],
+): string[] => {
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+
+  for (const suggestion of suggestions) {
+    const cleaned = suggestion.replace(/\s+/g, " ").trim();
+    if (!cleaned) {
+      continue;
+    }
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(cleaned);
+  }
+
+  const topicPool = contextTopics.filter(Boolean);
+  const detailed = deduped.map((suggestion, index) => {
+    if (isStructuredSuggestion(suggestion) && suggestion.length >= 120) {
+      return suggestion;
+    }
+    const topic = pickTopic([topicPool[index] ?? "", topicPool[0] ?? ""], "Core User Problem");
+    return toDetailedSuggestion(suggestion, topic);
+  });
+
+  if (detailed.length >= 4) {
+    return detailed.slice(0, 6);
+  }
+
+  const fillerTopics = [
+    pickTopic([topicPool[0] ?? ""], "User Onboarding"),
+    pickTopic([topicPool[1] ?? ""], "Idea Prioritization"),
+    pickTopic([topicPool[2] ?? ""], "Experiment Tracking"),
+    pickTopic([topicPool[3] ?? ""], "Feedback Loop"),
+  ];
+  const filler = fillerTopics.map((topic) => toDetailedSuggestion("", topic));
+  for (const suggestion of filler) {
+    if (detailed.length >= 4) {
+      break;
+    }
+    if (!detailed.includes(suggestion)) {
+      detailed.push(suggestion);
+    }
+  }
+
+  return detailed.slice(0, 6);
+};
+
 const toNormalizedLines = (content: string): string[] =>
   content
     .split(/\r?\n/)
@@ -71,16 +158,29 @@ const buildReportFromPlainText = (content: string): Omit<SessionReport, "id" | "
     missingQuestions: ["What is the narrowest user problem this project must solve first?"],
     suggestions: ensureNonEmpty(
       suggestions,
-      "Pick one MVP flow and define success metrics before implementation.",
+      "Idea: ship one narrow feature lane. Features: clear user trigger + visible result + memory hook. Implementation: isolate command, persistence, and report formatting. Creative twist: add one surprising but low-cost variant for testing.",
     ),
     relevantPastContext: ["No prior project memory found yet."],
     repoObservations: [],
   };
 };
 
+const buildReportFromArray = (items: unknown[]): Omit<SessionReport, "id" | "sessionId"> => {
+  const lines = items
+    .map((item) => coerceToString(item).trim())
+    .filter(Boolean);
+  return buildReportFromPlainText(lines.join("\n"));
+};
+
 const normalizeReport = (
   report: z.infer<typeof reportSchema>,
 ): Omit<SessionReport, "id" | "sessionId"> => {
+  const contextTopics = [
+    ...report.mainIdeasRaised,
+    ...report.patternsThemes,
+    ...report.strongestIdeas,
+    report.sessionGoal,
+  ];
   return {
     sessionGoal: report.sessionGoal.trim() || "No clear goal captured.",
     mainIdeasRaised: ensureNonEmpty(report.mainIdeasRaised, "No clear ideas were captured."),
@@ -97,9 +197,12 @@ const normalizeReport = (
       report.missingQuestions,
       "What is the narrowest user problem this project must solve first?",
     ),
-    suggestions: ensureNonEmpty(
-      report.suggestions,
-      "Pick one MVP flow and define success metrics before implementation.",
+    suggestions: ensureDetailedSuggestions(
+      ensureNonEmpty(
+        report.suggestions,
+        "Idea: ship one narrow feature lane. Features: clear user trigger + visible result + memory hook. Implementation: isolate command, persistence, and report formatting. Creative twist: add one surprising but low-cost variant for testing.",
+      ),
+      contextTopics,
     ),
     relevantPastContext: ensureNonEmpty(
       report.relevantPastContext,
@@ -109,27 +212,21 @@ const normalizeReport = (
   };
 };
 
-const withFallbackNotice = (
-  report: Omit<SessionReport, "id" | "sessionId">,
-  reason: string,
-): Omit<SessionReport, "id" | "sessionId"> => {
-  const prefix = "[Fallback: Ollama failed]";
+const buildFailureReport = (reason: string): Omit<SessionReport, "id" | "sessionId"> => {
   const details = reason.trim() || "Unknown error";
+  const shortReason = details.replace(/\s+/g, " ").slice(0, 220);
+  const failureMessage = `Failed to generate analysis via Ollama: ${shortReason}`;
 
   return {
-    ...report,
-    sessionGoal: `${prefix} ${report.sessionGoal}`.trim(),
-    weakPointsConcerns: ensureNonEmpty(
-      [`Ollama analysis failed. Reason: ${details}`, ...report.weakPointsConcerns],
-      "Key risks were not clearly discussed in this session.",
-    ),
-    suggestions: ensureNonEmpty(
-      [
-        "Review Ollama logs and bot console output for the exact failure cause.",
-        ...report.suggestions,
-      ],
-      "Pick one MVP flow and define success metrics before implementation.",
-    ),
+    sessionGoal: failureMessage,
+    mainIdeasRaised: [failureMessage],
+    patternsThemes: ["Analysis unavailable due to model/provider error."],
+    strongestIdeas: ["No model output was returned."],
+    weakPointsConcerns: [failureMessage],
+    missingQuestions: ["Please retry /end-session after fixing Ollama connectivity/model output."],
+    suggestions: ["Check Ollama logs and bot console logs, then retry /end-session."],
+    relevantPastContext: ["No fallback analysis generated."],
+    repoObservations: [],
   };
 };
 
@@ -261,10 +358,9 @@ export class OllamaAnalyzer implements Analyzer {
           ? `${error.name}: ${error.message}`
           : "Unknown analyzer error";
       console.warn(
-        `[ollama] Falling back to heuristic analyzer after ${elapsedMs}ms: ${message}`,
+        `[ollama] Returning short failure report after ${elapsedMs}ms: ${message}`,
       );
-      const fallbackReport = await this.options.fallbackAnalyzer.analyze(input);
-      return withFallbackNotice(fallbackReport, message);
+      return buildFailureReport(message);
     }
   }
 
@@ -282,8 +378,8 @@ export class OllamaAnalyzer implements Analyzer {
         stream: false,
         keep_alive: "30m",
         options: {
-          temperature: 0.2,
-          num_predict: 450,
+          temperature: 0.35,
+          num_predict: 700,
         },
         messages: [
           {
@@ -292,7 +388,8 @@ export class OllamaAnalyzer implements Analyzer {
               "You summarize brainstorming sessions for a Discord bot.",
               "Respond with exactly one JSON object and no markdown.",
               "Do not include code fences, labels, or commentary outside JSON.",
-              "Keep each list item short, practical, and specific.",
+              "Be practical, specific, and idea-generative.",
+              "Suggestions must contain concrete implementation directions and novel feature ideas, not generic advice.",
             ].join(" "),
           },
           {
@@ -338,7 +435,7 @@ export class OllamaAnalyzer implements Analyzer {
             keep_alive: "30m",
             options: {
               temperature: 0.2,
-              num_predict: 450,
+              num_predict: 700,
             },
             format: "json",
           }),
@@ -393,7 +490,19 @@ export class OllamaAnalyzer implements Analyzer {
           parsedPreview = "(unable to serialize parsed preview)";
         }
         console.info(`[ollama] Parsed response preview: ${parsedPreview}`);
-        return parsed;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return parsed;
+        }
+        if (Array.isArray(parsed)) {
+          console.warn(
+            "[ollama] Parsed JSON root is an array; coercing array content into report shape.",
+          );
+          return buildReportFromArray(parsed);
+        }
+        console.warn(
+          "[ollama] Parsed JSON root is not an object; coercing raw response into report shape.",
+        );
+        return buildReportFromPlainText(content);
       } catch (parseError) {
         const message = parseError instanceof Error ? parseError.message : "Unknown parse error";
         console.warn(
@@ -438,6 +547,9 @@ export class OllamaAnalyzer implements Analyzer {
       "- Each list key must be an array of concise strings.",
       "- repoObservations should be an empty array unless repo details were explicitly discussed.",
       "- Keep suggestions actionable and realistic.",
+      "- suggestions should contain 4-6 concrete idea proposals.",
+      '- each suggestions item should follow this shape: "Idea: ... Features: ... Implementation: ... Creative twist: ...".',
+      "- avoid generic filler like 'keep iterating' without concrete feature or implementation detail.",
       "",
       `Project: ${input.project.name}`,
       `Project description: ${input.project.description ?? "N/A"}`,

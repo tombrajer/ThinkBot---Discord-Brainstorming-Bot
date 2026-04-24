@@ -54,6 +54,10 @@ export class HeuristicAnalyzer implements Analyzer {
       ideas[0] ??
       `Brainstorm direction for project "${input.project.name}" and identify strongest next moves.`;
 
+    const primaryTheme = keywords[0] ?? "core workflow";
+    const secondaryTheme = keywords[1] ?? "activation";
+    const tertiaryTheme = keywords[2] ?? "retention";
+
     return {
       sessionGoal: goal,
       mainIdeasRaised: ideas.length > 0 ? ideas : ["No clear ideas were captured in this session."],
@@ -74,8 +78,10 @@ export class HeuristicAnalyzer implements Analyzer {
         "What does success look like in the first 2 weeks after release?",
       ],
       suggestions: [
-        "Pick one narrow MVP flow and defer optional features.",
-        "Define 2-3 measurable success metrics before implementation.",
+        `Idea: Build a focused "${primaryTheme}" command flow. Features: one-click entry command, clear next action prompt, lightweight status output. Implementation: add command handler + scoped state transitions + response formatter. Creative twist: include a rotating "try this next" nudge based on recent session themes.`,
+        `Idea: Add a structured idea board around "${secondaryTheme}". Features: cluster ideas into buckets (problem, solution, risks), quick vote reactions, top-3 auto-highlight. Implementation: persist tagged idea items and compute simple ranking at /end-session. Creative twist: add an "unpopular but high-leverage" bucket for contrarian ideas.`,
+        `Idea: Create an experimentation loop for "${tertiaryTheme}". Features: each strong idea gets hypothesis, success metric, and first test plan. Implementation: enrich Suggestions output with an "experiment card" template and track outcome notes in project memory. Creative twist: auto-suggest one low-cost experiment and one bold experiment per session.`,
+        "Define 2-3 measurable success metrics before implementation so idea quality can be compared across sessions.",
       ],
       relevantPastContext:
         memorySnippets.length > 0

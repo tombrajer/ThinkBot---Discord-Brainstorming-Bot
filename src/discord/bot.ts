@@ -1,6 +1,8 @@
 import { Client, Events, GatewayIntentBits, MessageFlags } from "discord.js";
 import { BrainstormingEngine } from "../core/brainstormingEngine.js";
+import { Clarifier } from "../domain/types.js";
 import { formatReport } from "../report/formatReport.js";
+import { runSessionClarify } from "./sessionClarify.js";
 
 const scopeFor = (guildId: string | null, userId: string): string => guildId ?? `dm:${userId}`;
 const MAX_DISCORD_CONTENT_LENGTH = 2_000;
@@ -53,6 +55,8 @@ const chunkMessage = (content: string, maxLength = MAX_DISCORD_CONTENT_LENGTH): 
 
 interface DiscordBotOptions {
   enableMessageContentIntent: boolean;
+  clarifier: Clarifier;
+  clarifyCooldownMs: number;
 }
 
 export const createDiscordBot = (
@@ -93,6 +97,53 @@ export const createDiscordBot = (
   });
 
   client.on(Events.InteractionCreate, async (interaction) => {
+    if (interaction.isAutocomplete()) {
+      const scopeId = scopeFor(interaction.guildId, interaction.user.id);
+      try {
+        if (!["project-select", "forget-project"].includes(interaction.commandName)) {
+          await interaction.respond([]);
+          return;
+        }
+
+        const focused = interaction.options.getFocused(true);
+        if (focused.name !== "project") {
+          await interaction.respond([]);
+          return;
+        }
+
+        const query = String(focused.value ?? "").trim().toLowerCase();
+        const projects = await engine.listProjects(scopeId);
+        const filtered = projects
+          .filter((project) => {
+            if (!query) {
+              return true;
+            }
+            return (
+              project.name.toLowerCase().includes(query) ||
+              project.id.toLowerCase().includes(query)
+            );
+          })
+          .slice(0, 25)
+          .map((project) => ({
+            name: project.name.slice(0, 100),
+            value: project.name,
+          }));
+
+        await interaction.respond(filtered);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown autocomplete error";
+        console.error(
+          `[discord] Autocomplete exception command=${interaction.commandName} scope=${scopeId}: ${message}`,
+        );
+        try {
+          await interaction.respond([]);
+        } catch {
+          // no-op: interaction may already be expired
+        }
+      }
+      return;
+    }
+
     if (!interaction.isChatInputCommand()) {
       return;
     }
@@ -105,7 +156,7 @@ export const createDiscordBot = (
         const description = interaction.options.getString("description") ?? undefined;
         const project = await engine.createProject(scopeId, { name, description });
         await interaction.reply({
-          content: `Project created: ${project.name} (${project.id})`,
+          content: `Project created: ${project.name}`,
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -120,9 +171,7 @@ export const createDiscordBot = (
             : projects
                 .map(
                   (project) =>
-                    `- ${project.name} (${project.id})${
-                      active?.id === project.id ? " [active]" : ""
-                    }`,
+                    `- ${project.name}${active?.id === project.id ? " [active]" : ""}`,
                 )
                 .join("\n");
         await interaction.reply({ content, flags: MessageFlags.Ephemeral });
@@ -130,12 +179,21 @@ export const createDiscordBot = (
       }
 
       if (interaction.commandName === "project-select") {
-        const projectId = interaction.options.getString("project_id", true);
-        await engine.selectProject(scopeId, projectId);
+        const selector = interaction.options.getString("project", true);
+        const project = await engine.selectProject(scopeId, selector);
         await interaction.reply({
-          content: `Active project set to ${projectId}.`,
+          content: `Active project set to ${project.name}.`,
           flags: MessageFlags.Ephemeral,
         });
+        return;
+      }
+
+      if (interaction.commandName === "project-active") {
+        const project = await engine.getActiveProject(scopeId);
+        const content = project
+          ? `Active project: ${project.name}`
+          : "No active project selected.";
+        await interaction.reply({ content, flags: MessageFlags.Ephemeral });
         return;
       }
 
@@ -154,10 +212,57 @@ export const createDiscordBot = (
       }
 
       if (interaction.commandName === "start-session") {
-        const session = await engine.startSession(scopeId, interaction.channelId, interaction.user.id);
+        await engine.startSession(scopeId, interaction.channelId, interaction.user.id);
         await interaction.reply(
-          `Session started for active project. Session ID: ${session.id}. Messages in this channel are now captured.`,
+          "Session started for active project. Messages in this channel are now captured.",
         );
+        return;
+      }
+
+      if (interaction.commandName === "session-clarify") {
+        const focus = interaction.options.getString("focus") ?? undefined;
+        console.info(
+          `[clarify] /session-clarify start scope=${scopeId} channel=${interaction.channelId} user=${interaction.user.id} focus=${focus ?? "(none)"}`,
+        );
+        await interaction.deferReply();
+
+        const result = await runSessionClarify({
+          engine,
+          clarifier: options.clarifier,
+          scopeId,
+          channelId: interaction.channelId,
+          focus,
+          cooldownMs: options.clarifyCooldownMs,
+        });
+
+        if (result.kind === "cooldown") {
+          console.info(
+            `[clarify] /session-clarify cooldown hit retryAfterSeconds=${result.retryAfterSeconds}`,
+          );
+          await interaction.editReply(
+            `Please wait ${result.retryAfterSeconds}s before running /session-clarify again.`,
+          );
+          return;
+        }
+
+        if (result.kind === "error") {
+          console.error(`[clarify] /session-clarify error: ${result.message}`);
+          await interaction.editReply(result.message);
+          return;
+        }
+
+        if (result.kind === "none") {
+          console.info("[clarify] /session-clarify no questions needed");
+          await interaction.editReply("No clarifying questions needed right now.");
+          return;
+        }
+
+        const content = [
+          "Clarifying questions:",
+          ...result.questions.map((question, index) => `${index + 1}. ${question}`),
+        ].join("\n");
+        console.info(`[clarify] /session-clarify posted questionCount=${result.questions.length}`);
+        await interaction.editReply(content);
         return;
       }
 
@@ -224,22 +329,48 @@ export const createDiscordBot = (
       }
 
       if (interaction.commandName === "forget-project") {
-        const projectId = interaction.options.getString("project_id", true);
-        await engine.deleteProject(scopeId, projectId);
+        const selector = interaction.options.getString("project", true);
+        const resolved = await engine.resolveProject(scopeId, selector);
+        await engine.deleteProject(scopeId, selector);
         await interaction.reply({
-          content: `Deleted project ${projectId}.`,
+          content: `Deleted project ${resolved.name}.`,
           flags: MessageFlags.Ephemeral,
         });
+        return;
+      }
+
+      if (interaction.commandName === "forget-all-projects") {
+        const confirm = interaction.options.getBoolean("confirm", true);
+        if (!confirm) {
+          await interaction.reply({
+            content: "Set `confirm` to true to delete all projects.",
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+        const deletedCount = await engine.deleteAllProjects(scopeId);
+        await interaction.reply({
+          content: `Deleted ${deletedCount} project(s) in this scope.`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       console.error(
         `[discord] Interaction handler exception command=${interaction.commandName} scope=${scopeId} channel=${interaction.channelId}: ${message}`,
       );
-      if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({ content: `Error: ${message}`, flags: MessageFlags.Ephemeral });
-      } else {
-        await interaction.reply({ content: `Error: ${message}`, flags: MessageFlags.Ephemeral });
+      try {
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({ content: `Error: ${message}`, flags: MessageFlags.Ephemeral });
+        } else {
+          await interaction.reply({ content: `Error: ${message}`, flags: MessageFlags.Ephemeral });
+        }
+      } catch (sendError) {
+        const sendMessage = sendError instanceof Error ? sendError.message : String(sendError);
+        console.error(
+          `[discord] Failed to send interaction error response command=${interaction.commandName}: ${sendMessage}`,
+        );
       }
     }
   });

@@ -13,12 +13,15 @@ This bot is scoped as a brainstorming analyzer, not a coding agent.
 
 - `/project-create name description?`
 - `/project-list`
-- `/project-select project_id`
+- `/project-active`
+- `/project-select project` (exact name)
 - `/attach-repo url`
-- `/start-session`
-- `/end-session`
 - `/project-memory`
-- `/forget-project project_id`
+- `/start-session`
+- `/session-clarify focus?`
+- `/end-session`
+- `/forget-project project` (exact name)
+- `/forget-all-projects confirm:true`
 
 ## Quick start
 

@@ -96,6 +96,10 @@ describe("OllamaAnalyzer", () => {
 
     expect(result.sessionGoal).toBe("Use local model summary");
     expect(result.mainIdeasRaised).toEqual(["Idea A"]);
+    expect(result.suggestions.length).toBeGreaterThanOrEqual(4);
+    expect(result.suggestions[0]).toContain("Features:");
+    expect(result.suggestions[0]).toContain("Implementation:");
+    expect(result.suggestions[0]).toContain("Creative twist:");
     expect(fallbackAnalyze).not.toHaveBeenCalled();
   });
 
@@ -118,12 +122,12 @@ describe("OllamaAnalyzer", () => {
     });
 
     const result = await analyzer.analyze(makeInput());
-    expect(result.sessionGoal.startsWith("[Fallback: Ollama failed]")).toBe(true);
-    expect(result.weakPointsConcerns[0].startsWith("Ollama analysis failed. Reason:")).toBe(true);
+    expect(result.sessionGoal.startsWith("Failed to generate analysis via Ollama:")).toBe(true);
+    expect(result.mainIdeasRaised[0].startsWith("Failed to generate analysis via Ollama:")).toBe(true);
     expect(result.suggestions[0]).toBe(
-      "Review Ollama logs and bot console output for the exact failure cause.",
+      "Check Ollama logs and bot console logs, then retry /end-session.",
     );
-    expect(fallbackAnalyze).toHaveBeenCalledTimes(1);
+    expect(fallbackAnalyze).not.toHaveBeenCalled();
   });
 
   it("salvages output when Ollama returns invalid JSON content", async () => {
@@ -309,6 +313,33 @@ describe("OllamaAnalyzer", () => {
     expect(result.sessionGoal).toBe("Session goal: define MVP onboarding.");
     expect(result.mainIdeasRaised[0]).toBe("Session goal: define MVP onboarding.");
     expect(result.suggestions.length).toBeGreaterThan(0);
+    expect(fallbackAnalyze).not.toHaveBeenCalled();
+  });
+
+  it("salvages root-array JSON output instead of falling back", async () => {
+    const { analyzer: fallback, analyze: fallbackAnalyze } = makeFallbackAnalyzer();
+
+    mockFetch(
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          message: {
+            content: '["Brainstorm new features for the Discord bot"]',
+          },
+        }),
+      })) as unknown as typeof fetch,
+    );
+
+    const analyzer = new OllamaAnalyzer({
+      baseUrl: "http://127.0.0.1:11434",
+      model: "qwen3:8b",
+      timeoutMs: 1_000,
+      fallbackAnalyzer: fallback,
+    });
+
+    const result = await analyzer.analyze(makeInput());
+
+    expect(result.sessionGoal).toBe("Brainstorm new features for the Discord bot");
     expect(fallbackAnalyze).not.toHaveBeenCalled();
   });
 });

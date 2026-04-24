@@ -28,6 +28,7 @@ const parseFromFenceBlocks = (content: string): unknown | undefined => {
 
 const parseFromFirstBalancedJson = (content: string): unknown | undefined => {
   const text = content.trim();
+  let firstParsedNonObject: unknown | undefined;
 
   for (let start = 0; start < text.length; start += 1) {
     const opener = text[start];
@@ -77,7 +78,12 @@ const parseFromFirstBalancedJson = (content: string): unknown | undefined => {
           const candidate = text.slice(start, end + 1);
           const parsed = tryParseJson(candidate);
           if (parsed !== undefined) {
-            return parsed;
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              return parsed;
+            }
+            if (firstParsedNonObject === undefined) {
+              firstParsedNonObject = parsed;
+            }
           }
           break;
         }
@@ -85,7 +91,7 @@ const parseFromFirstBalancedJson = (content: string): unknown | undefined => {
     }
   }
 
-  return undefined;
+  return firstParsedNonObject;
 };
 
 export const parseModelJson = (content: string): unknown => {

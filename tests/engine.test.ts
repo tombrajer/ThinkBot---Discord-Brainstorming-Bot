@@ -37,6 +37,41 @@ describe("BrainstormingEngine", () => {
     await engine.selectProject("guild-1", project.id);
     const active = await engine.getActiveProject("guild-1");
     expect(active?.id).toBe(project.id);
+
+    const projectB = await engine.createProject("guild-1", {
+      name: "Idea B",
+      description: "Another concept",
+    });
+    const selectedByName = await engine.selectProject("guild-1", "idea b");
+    expect(selectedByName.id).toBe(projectB.id);
+    const activeByName = await engine.getActiveProject("guild-1");
+    expect(activeByName?.id).toBe(projectB.id);
+  });
+
+  it("rejects duplicate project names in the same scope", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      new HeuristicAnalyzer(),
+    );
+
+    await engine.createProject("guild-1", {
+      name: "ThinkBot",
+      description: "first",
+    });
+
+    await expect(
+      engine.createProject("guild-1", {
+        name: " thinkbot ",
+        description: "duplicate with case/whitespace changes",
+      }),
+    ).rejects.toThrow("A project with that name already exists in this scope.");
+
+    await expect(
+      engine.createProject("guild-2", {
+        name: "ThinkBot",
+        description: "allowed in other scope",
+      }),
+    ).resolves.toBeTruthy();
   });
 
   it("runs session lifecycle and stores report + memory", async () => {
@@ -85,5 +120,78 @@ describe("BrainstormingEngine", () => {
     await expect(
       engine.startSession("guild-1", "channel-1", "user-2"),
     ).rejects.toThrow("An active session already exists");
+  });
+
+  it("deletes project by name and clears scoped data", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      new HeuristicAnalyzer(),
+    );
+
+    const project = await engine.createProject("guild-1", {
+      name: "Delete Me",
+      description: "desc",
+    });
+    await engine.selectProject("guild-1", project.id);
+    await engine.startSession("guild-1", "channel-1", "user-1");
+    await engine.captureMessage("guild-1", "channel-1", "user-1", "hello");
+    await engine.endSession("guild-1", "channel-1");
+
+    await engine.deleteProject("guild-1", "delete me");
+    await expect(engine.resolveProject("guild-1", project.id)).rejects.toThrow(
+      "Project not found in this scope.",
+    );
+  });
+
+  it("deletes all projects for a scope", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      new HeuristicAnalyzer(),
+    );
+
+    await engine.createProject("guild-1", {
+      name: "A",
+      description: "a",
+    });
+    await engine.createProject("guild-1", {
+      name: "B",
+      description: "b",
+    });
+    await engine.createProject("guild-2", {
+      name: "Other Scope",
+      description: "c",
+    });
+
+    const deletedCount = await engine.deleteAllProjects("guild-1");
+    expect(deletedCount).toBe(2);
+
+    const guild1Projects = await engine.listProjects("guild-1");
+    const guild2Projects = await engine.listProjects("guild-2");
+    expect(guild1Projects).toHaveLength(0);
+    expect(guild2Projects).toHaveLength(1);
+  });
+
+  it("tracks session-clarify cooldown per session and channel", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      new HeuristicAnalyzer(),
+    );
+
+    const project = await engine.createProject("guild-1", {
+      name: "Cooldown Test",
+      description: "d",
+    });
+    await engine.selectProject("guild-1", project.id);
+    const session = await engine.startSession("guild-1", "channel-1", "user-1");
+
+    const now = 1_000_000;
+    await engine.markSessionClarifyRun(session.id, "channel-1", now);
+    const remaining = await engine.getSessionClarifyCooldownRemainingMs(
+      session.id,
+      "channel-1",
+      60_000,
+      now + 10_000,
+    );
+    expect(remaining).toBe(50_000);
   });
 });

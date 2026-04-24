@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   Analyzer,
+  ClarifyInput,
   Project,
   ProjectMemory,
   Session,
@@ -22,11 +23,20 @@ export class BrainstormingEngine {
 
   async createProject(scopeId: string, input: CreateProjectInput): Promise<Project> {
     return this.store.update((state) => {
+      const normalizedName = input.name.trim();
+      const loweredName = normalizedName.toLowerCase();
+      const duplicate = state.projects.find(
+        (project) => project.scopeId === scopeId && project.name.trim().toLowerCase() === loweredName,
+      );
+      if (duplicate) {
+        throw new Error("A project with that name already exists in this scope.");
+      }
+
       const now = new Date().toISOString();
       const project: Project = {
         id: randomUUID(),
         scopeId,
-        name: input.name.trim(),
+        name: normalizedName,
         description: input.description?.trim(),
         createdAt: now,
         updatedAt: now,
@@ -47,19 +57,49 @@ export class BrainstormingEngine {
     return state.projects.filter((project) => project.scopeId === scopeId);
   }
 
-  async selectProject(scopeId: string, projectId: string): Promise<void> {
-    await this.store.update((state) => {
-      const project = state.projects.find(
-        (candidate) => candidate.id === projectId && candidate.scopeId === scopeId,
+  private resolveProjectFromState(
+    scopeId: string,
+    selector: string,
+    projects: Project[],
+  ): Project {
+    const trimmedSelector = selector.trim();
+    const exactIdMatch = projects.find(
+      (candidate) => candidate.scopeId === scopeId && candidate.id === trimmedSelector,
+    );
+    if (exactIdMatch) {
+      return exactIdMatch;
+    }
+
+    const lowered = trimmedSelector.toLowerCase();
+    const nameMatches = projects.filter(
+      (candidate) => candidate.scopeId === scopeId && candidate.name.toLowerCase() === lowered,
+    );
+    if (nameMatches.length === 1) {
+      return nameMatches[0];
+    }
+    if (nameMatches.length > 1) {
+      throw new Error(
+        "More than one project has that name. Use the project ID from /project-list.",
       );
-      if (!project) {
-        throw new Error("Project not found in this scope.");
-      }
+    }
+
+    throw new Error("Project not found in this scope.");
+  }
+
+  async resolveProject(scopeId: string, selector: string): Promise<Project> {
+    const state = await this.store.read();
+    return this.resolveProjectFromState(scopeId, selector, state.projects);
+  }
+
+  async selectProject(scopeId: string, selector: string): Promise<Project> {
+    return this.store.update((state) => {
+      const project = this.resolveProjectFromState(scopeId, selector, state.projects);
       if (!state.scopes[scopeId]) {
         state.scopes[scopeId] = {};
       }
       state.scopes[scopeId].activeProjectId = project.id;
       project.updatedAt = new Date().toISOString();
+      return project;
     });
   }
 
@@ -71,12 +111,7 @@ export class BrainstormingEngine {
 
   async attachRepo(scopeId: string, projectId: string, linkedRepoUrl: string): Promise<void> {
     await this.store.update((state) => {
-      const project = state.projects.find(
-        (candidate) => candidate.id === projectId && candidate.scopeId === scopeId,
-      );
-      if (!project) {
-        throw new Error("Project not found in this scope.");
-      }
+      const project = this.resolveProjectFromState(scopeId, projectId, state.projects);
       project.linkedRepoUrl = linkedRepoUrl;
       project.updatedAt = new Date().toISOString();
     });
@@ -192,6 +227,7 @@ export class BrainstormingEngine {
       }
       activeSession.status = "ended";
       activeSession.endedAt = new Date().toISOString();
+      delete mutableState.clarifyRuns[this.clarifyRunKey(activeSession.id, activeSession.channelId)];
 
       const report: SessionReport = {
         id: randomUUID(),
@@ -238,15 +274,83 @@ export class BrainstormingEngine {
     );
   }
 
-  async deleteProject(scopeId: string, projectId: string): Promise<void> {
+  async buildClarifyInput(
+    scopeId: string,
+    channelId: string,
+    focus?: string,
+  ): Promise<ClarifyInput> {
+    const state = await this.store.read();
+    const activeProjectId = state.scopes[scopeId]?.activeProjectId;
+    if (!activeProjectId) {
+      throw new Error("No active project selected.");
+    }
+
+    const session = state.sessions.find(
+      (candidate) =>
+        candidate.scopeId === scopeId &&
+        candidate.channelId === channelId &&
+        candidate.projectId === activeProjectId &&
+        candidate.status === "active",
+    );
+    if (!session) {
+      throw new Error("No active session found for this channel.");
+    }
+
+    const project = state.projects.find((candidate) => candidate.id === activeProjectId);
+    if (!project) {
+      throw new Error("Project not found in this scope.");
+    }
+
+    const messages = state.messages
+      .filter((message) => message.sessionId === session.id)
+      .slice(-50);
+    const relevantPastContext = state.memories
+      .filter((memory) => memory.projectId === project.id)
+      .slice(-6);
+
+    return {
+      project,
+      session,
+      messages,
+      relevantPastContext,
+      focus: focus?.trim() || undefined,
+    };
+  }
+
+  async getSessionClarifyCooldownRemainingMs(
+    sessionId: string,
+    channelId: string,
+    cooldownMs: number,
+    nowMs = Date.now(),
+  ): Promise<number> {
+    const state = await this.store.read();
+    const key = this.clarifyRunKey(sessionId, channelId);
+    const lastRun = state.clarifyRuns[key];
+    if (!lastRun) {
+      return 0;
+    }
+    const elapsed = nowMs - lastRun;
+    if (elapsed >= cooldownMs) {
+      return 0;
+    }
+    return cooldownMs - elapsed;
+  }
+
+  async markSessionClarifyRun(
+    sessionId: string,
+    channelId: string,
+    atMs = Date.now(),
+  ): Promise<void> {
     await this.store.update((state) => {
-      const before = state.projects.length;
-      state.projects = state.projects.filter(
-        (project) => !(project.id === projectId && project.scopeId === scopeId),
-      );
-      if (state.projects.length === before) {
-        throw new Error("Project not found in this scope.");
-      }
+      state.clarifyRuns[this.clarifyRunKey(sessionId, channelId)] = atMs;
+    });
+  }
+
+  async deleteProject(scopeId: string, selector: string): Promise<void> {
+    await this.store.update((state) => {
+      const project = this.resolveProjectFromState(scopeId, selector, state.projects);
+      const projectId = project.id;
+      state.projects = state.projects.filter((candidate) => candidate.id !== projectId);
 
       const removedSessionIds = new Set(
         state.sessions
@@ -257,11 +361,61 @@ export class BrainstormingEngine {
       state.messages = state.messages.filter((message) => !removedSessionIds.has(message.sessionId));
       state.memories = state.memories.filter((memory) => memory.projectId !== projectId);
       state.reports = state.reports.filter((report) => !removedSessionIds.has(report.sessionId));
+      for (const sessionId of removedSessionIds) {
+        for (const key of Object.keys(state.clarifyRuns)) {
+          if (key.startsWith(`${sessionId}:`)) {
+            delete state.clarifyRuns[key];
+          }
+        }
+      }
 
       if (state.scopes[scopeId]?.activeProjectId === projectId) {
         const replacement = state.projects.find((project) => project.scopeId === scopeId);
         state.scopes[scopeId].activeProjectId = replacement?.id;
       }
     });
+  }
+
+  async deleteAllProjects(scopeId: string): Promise<number> {
+    return this.store.update((state) => {
+      const projectIds = new Set(
+        state.projects
+          .filter((project) => project.scopeId === scopeId)
+          .map((project) => project.id),
+      );
+      const deletedCount = projectIds.size;
+      if (deletedCount === 0) {
+        return 0;
+      }
+
+      const removedSessionIds = new Set(
+        state.sessions
+          .filter((session) => projectIds.has(session.projectId))
+          .map((session) => session.id),
+      );
+
+      state.projects = state.projects.filter((project) => !projectIds.has(project.id));
+      state.sessions = state.sessions.filter((session) => !projectIds.has(session.projectId));
+      state.messages = state.messages.filter((message) => !removedSessionIds.has(message.sessionId));
+      state.memories = state.memories.filter((memory) => !projectIds.has(memory.projectId));
+      state.reports = state.reports.filter((report) => !removedSessionIds.has(report.sessionId));
+      for (const sessionId of removedSessionIds) {
+        for (const key of Object.keys(state.clarifyRuns)) {
+          if (key.startsWith(`${sessionId}:`)) {
+            delete state.clarifyRuns[key];
+          }
+        }
+      }
+
+      if (state.scopes[scopeId]) {
+        state.scopes[scopeId].activeProjectId = undefined;
+      }
+
+      return deletedCount;
+    });
+  }
+
+  private clarifyRunKey(sessionId: string, channelId: string): string {
+    return `${sessionId}:${channelId}`;
   }
 }

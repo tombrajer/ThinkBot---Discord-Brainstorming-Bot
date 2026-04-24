@@ -17,8 +17,13 @@ describe("parseModelJson", () => {
     expect(result).toEqual({ sessionGoal: "Goal" });
   });
 
-  it("extracts first valid JSON value from mixed text", () => {
+  it("extracts a valid JSON payload from mixed text", () => {
     const result = parseModelJson('not-json {oops} preface [{"sessionGoal":"Goal"}] trailing');
-    expect(result).toEqual([{ sessionGoal: "Goal" }]);
+    expect(result).toEqual({ sessionGoal: "Goal" });
+  });
+
+  it("prefers object payloads over earlier array payloads", () => {
+    const result = parseModelJson('[1,2,3] {"sessionGoal":"Goal"}');
+    expect(result).toEqual({ sessionGoal: "Goal" });
   });
 });

@@ -63,6 +63,7 @@ export interface StoreState {
   messages: SessionMessage[];
   memories: ProjectMemory[];
   reports: SessionReport[];
+  clarifyRuns: Record<string, number>;
   scopes: Record<string, ScopeState>;
 }
 
@@ -75,4 +76,16 @@ export interface AnalysisInput {
 
 export interface Analyzer {
   analyze(input: AnalysisInput): Promise<Omit<SessionReport, "id" | "sessionId">>;
+}
+
+export interface ClarifyInput {
+  project: Project;
+  session: Session;
+  messages: SessionMessage[];
+  relevantPastContext: ProjectMemory[];
+  focus?: string;
+}
+
+export interface Clarifier {
+  generate(input: ClarifyInput): Promise<{ questions: string[] }>;
 }
