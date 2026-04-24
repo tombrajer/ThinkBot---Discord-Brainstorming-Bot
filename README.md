@@ -40,6 +40,12 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 ANALYZER_PROVIDER=ollama
 OLLAMA_TIMEOUT_MS=180000
 ```
+Use `OLLAMA_TIMEOUT_MS=180000` (3 minutes) for slower local models to avoid 60-second aborts.
+
+For Docker/VM networking, set:
+```bash
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+```
 
 If you need to force the old rule-based analyzer:
 ```bash
@@ -62,6 +68,18 @@ npm run register:commands
 ```bash
 npm run dev
 ```
+
+## Ollama setup notes
+
+1. Start Ollama normally (desktop app/service). Do not run `ollama serve` twice.
+2. Verify the API is reachable:
+```powershell
+curl http://127.0.0.1:11434/api/tags
+```
+3. Set `OLLAMA_MODEL` to the exact value shown by `ollama list`.
+4. Keep `OLLAMA_BASE_URL` at `http://127.0.0.1:11434` unless the bot runs in Docker/VM, then use `http://host.docker.internal:11434`.
+
+On startup, the bot checks `GET /api/tags`. If Ollama is unreachable or the configured model is missing, it logs a clear warning and falls back to the heuristic analyzer instead of crashing.
 
 ## Development
 

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AnalysisInput, Analyzer, SessionReport } from "../domain/types.js";
+import { parseModelJson } from "./modelJsonParser.js";
 
 const reportSchema = z.object({
   sessionGoal: z.string(),
@@ -49,31 +50,64 @@ const normalizeReport = (
   };
 };
 
-const extractJsonObject = (content: string): unknown => {
-  const direct = content.trim();
-  if (direct.startsWith("{") && direct.endsWith("}")) {
-    return JSON.parse(direct);
-  }
-
-  const fenced = content.match(/```json\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) {
-    return JSON.parse(fenced[1].trim());
-  }
-
-  const objectMatch = content.match(/\{[\s\S]*\}/);
-  if (objectMatch?.[0]) {
-    return JSON.parse(objectMatch[0]);
-  }
-
-  throw new Error("No JSON object found in Ollama response.");
-};
-
 interface OllamaAnalyzerOptions {
   baseUrl: string;
   model: string;
   timeoutMs: number;
   fallbackAnalyzer: Analyzer;
 }
+
+const withNoTrailingSlash = (value: string): string => value.replace(/\/+$/, "");
+
+const formatRequestError = (error: unknown, baseUrl: string, timeoutMs: number): Error => {
+  if (
+    error instanceof Error &&
+    (error.name === "AbortError" || error.message.toLowerCase().includes("aborted"))
+  ) {
+    return new Error(
+      `Ollama timed out after ${timeoutMs}ms. Increase OLLAMA_TIMEOUT_MS or use a smaller model.`,
+    );
+  }
+
+  if (error instanceof Error && error.message.includes("Failed to fetch")) {
+    return new Error(
+      [
+        `Could not reach Ollama at ${baseUrl}.`,
+        "Check OLLAMA_BASE_URL and confirm Ollama is running.",
+        "If the app runs in Docker, use http://host.docker.internal:11434.",
+      ].join(" "),
+    );
+  }
+
+  return error instanceof Error ? error : new Error("Unknown Ollama analyzer error.");
+};
+
+const formatHttpError = (status: number, body: string, model: string): Error => {
+  const loweredBody = body.toLowerCase();
+
+  if (status === 404 && loweredBody.includes("model not found")) {
+    return new Error(
+      [
+        `Ollama model '${model}' was not found.`,
+        "Set OLLAMA_MODEL to an exact name from 'ollama list' or pull the model first.",
+      ].join(" "),
+    );
+  }
+
+  if (status === 404) {
+    return new Error(
+      "Ollama endpoint was not found. Check OLLAMA_BASE_URL and ensure it points to the Ollama API root.",
+    );
+  }
+
+  if (status === 408 || status === 504 || loweredBody.includes("timed out")) {
+    return new Error(
+      "Ollama request timed out while the model may still be loading. Increase OLLAMA_TIMEOUT_MS.",
+    );
+  }
+
+  return new Error(`Ollama request failed (${status}): ${body}`);
+};
 
 export class OllamaAnalyzer implements Analyzer {
   constructor(private readonly options: OllamaAnalyzerOptions) {}
@@ -97,11 +131,14 @@ export class OllamaAnalyzer implements Analyzer {
   }
 
   private async analyzeWithOllama(input: AnalysisInput): Promise<unknown> {
+    const requestStartedAt = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    const baseUrl = withNoTrailingSlash(this.options.baseUrl);
+    let requestStatus = "ok";
 
     try {
-      const response = await fetch(`${this.options.baseUrl}/api/chat`, {
+      const response = await fetch(`${baseUrl}/api/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -114,16 +151,16 @@ export class OllamaAnalyzer implements Analyzer {
           keep_alive: "30m",
           options: {
             temperature: 0.2,
-            num_predict: 900,
+            num_predict: 450,
           },
           messages: [
             {
               role: "system",
               content: [
-                "You are a Discord brainstorming analysis bot.",
-                "Return output as strict JSON only.",
-                "Do not include markdown.",
-                "Keep analysis concise, practical, and critical when needed.",
+                "You summarize brainstorming sessions for a Discord bot.",
+                "Respond with exactly one JSON object and no markdown.",
+                "Do not include code fences, labels, or commentary outside JSON.",
+                "Keep each list item short, practical, and specific.",
               ].join(" "),
             },
             {
@@ -136,7 +173,7 @@ export class OllamaAnalyzer implements Analyzer {
 
       if (!response.ok) {
         const errorBody = await response.text();
-        throw new Error(`Ollama request failed (${response.status}): ${errorBody}`);
+        throw formatHttpError(response.status, errorBody, this.options.model);
       }
 
       const payload = (await response.json()) as {
@@ -149,25 +186,22 @@ export class OllamaAnalyzer implements Analyzer {
         throw new Error("Ollama returned an empty response.");
       }
 
-      return extractJsonObject(content);
+      return parseModelJson(content);
     } catch (error) {
-      if (
-        error instanceof Error &&
-        (error.name === "AbortError" || error.message.toLowerCase().includes("aborted"))
-      ) {
-        throw new Error(
-          `Ollama timed out after ${this.options.timeoutMs}ms. Increase OLLAMA_TIMEOUT_MS or use a smaller model.`,
-        );
-      }
-      throw error;
+      requestStatus = "error";
+      throw formatRequestError(error, baseUrl, this.options.timeoutMs);
     } finally {
       clearTimeout(timer);
+      const durationMs = Date.now() - requestStartedAt;
+      console.info(
+        `[ollama] Chat request status=${requestStatus} baseUrl=${baseUrl} model=${this.options.model} timeoutMs=${this.options.timeoutMs} durationMs=${durationMs}`,
+      );
     }
   }
 
   private buildPrompt(input: AnalysisInput): string {
     const sessionMessages = input.messages
-      .slice(-80)
+      .slice(-50)
       .map(
         (message, index) =>
           `${index + 1}. [${message.timestamp}] ${message.authorId}: ${message.content}`,
@@ -175,14 +209,15 @@ export class OllamaAnalyzer implements Analyzer {
       .join("\n");
 
     const memory = input.relevantPastContext
-      .slice(-8)
+      .slice(-6)
       .map((item, index) => `${index + 1}. ${item.content}`)
       .join("\n");
 
     return [
-      "Analyze this brainstorming session and return JSON with these keys:",
+      "Return one JSON object with these keys:",
       "sessionGoal, mainIdeasRaised, patternsThemes, strongestIdeas, weakPointsConcerns, missingQuestions, suggestions, relevantPastContext, repoObservations",
       "Rules:",
+      "- Use plain strings only; no markdown formatting.",
       "- Each list key must be an array of concise strings.",
       "- repoObservations should be an empty array unless repo details were explicitly discussed.",
       "- Keep suggestions actionable and realistic.",

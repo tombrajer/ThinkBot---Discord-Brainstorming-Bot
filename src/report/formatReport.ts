@@ -1,16 +1,23 @@
 import { SessionReport } from "../domain/types.js";
 
+const cleanDiscordText = (value: string): string => {
+  const withoutFences = value.replace(/```(?:json)?/gi, "").replace(/```/g, "");
+  const withoutObjectDump = withoutFences.replace(/\[object Object\]/g, "details unavailable");
+  return withoutObjectDump.trim();
+};
+
 const section = (title: string, items: string[]): string => {
-  if (items.length === 0) {
-    return `## ${title}\n- None`;
+  const cleanedItems = items.map((item) => cleanDiscordText(item)).filter(Boolean);
+  if (cleanedItems.length === 0) {
+    return `${title}:\n- None`;
   }
-  return `## ${title}\n${items.map((item) => `- ${item}`).join("\n")}`;
+  return `${title}:\n${cleanedItems.map((item) => `- ${item}`).join("\n")}`;
 };
 
 export const formatReport = (report: SessionReport): string => {
   return [
-    `## Session goal`,
-    `- ${report.sessionGoal}`,
+    `Session goal:`,
+    `- ${cleanDiscordText(report.sessionGoal) || "No clear goal captured."}`,
     "",
     section("Main ideas raised", report.mainIdeasRaised),
     "",

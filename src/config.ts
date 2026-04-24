@@ -23,6 +23,10 @@ const configSchema = z.object({
 
 export type AppConfig = z.infer<typeof configSchema>;
 
+export const parseConfig = (env: NodeJS.ProcessEnv): AppConfig => {
+  return configSchema.parse(env);
+};
+
 export const readConfig = (): AppConfig => {
-  return configSchema.parse(process.env);
+  return parseConfig(process.env);
 };
