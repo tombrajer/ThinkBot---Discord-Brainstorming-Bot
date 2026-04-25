@@ -171,27 +171,4 @@ describe("BrainstormingEngine", () => {
     expect(guild2Projects).toHaveLength(1);
   });
 
-  it("tracks session-clarify cooldown per session and channel", async () => {
-    const engine = new BrainstormingEngine(
-      new JsonStore(storePath),
-      new HeuristicAnalyzer(),
-    );
-
-    const project = await engine.createProject("guild-1", {
-      name: "Cooldown Test",
-      description: "d",
-    });
-    await engine.selectProject("guild-1", project.id);
-    const session = await engine.startSession("guild-1", "channel-1", "user-1");
-
-    const now = 1_000_000;
-    await engine.markSessionClarifyRun(session.id, "channel-1", now);
-    const remaining = await engine.getSessionClarifyCooldownRemainingMs(
-      session.id,
-      "channel-1",
-      60_000,
-      now + 10_000,
-    );
-    expect(remaining).toBe(50_000);
-  });
 });

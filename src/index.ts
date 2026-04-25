@@ -3,7 +3,6 @@ import { readConfig } from "./config.js";
 import { BrainstormingEngine } from "./core/brainstormingEngine.js";
 import { createDiscordBot } from "./discord/bot.js";
 import { HeuristicAnalyzer } from "./analysis/heuristicAnalyzer.js";
-import { OllamaClarifier } from "./analysis/ollamaClarifier.js";
 import { OllamaAnalyzer } from "./analysis/ollamaAnalyzer.js";
 import { validateOllamaHealth } from "./analysis/ollamaHealth.js";
 import { Analyzer } from "./domain/types.js";
@@ -40,17 +39,10 @@ const start = async () => {
   }
 
   const engine = new BrainstormingEngine(store, analyzer);
-  const clarifier = new OllamaClarifier({
-    baseUrl: config.OLLAMA_BASE_URL,
-    model: config.OLLAMA_MODEL,
-    timeoutMs: config.OLLAMA_TIMEOUT_MS,
-  });
 
   const createBot = (enableMessageContentIntent: boolean) =>
     createDiscordBot(engine, {
       enableMessageContentIntent,
-      clarifier,
-      clarifyCooldownMs: 60_000,
     });
 
   let bot = createBot(config.ENABLE_MESSAGE_CONTENT_INTENT);

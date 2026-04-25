@@ -1,8 +1,6 @@
 import { Client, Events, GatewayIntentBits, MessageFlags } from "discord.js";
 import { BrainstormingEngine } from "../core/brainstormingEngine.js";
-import { Clarifier } from "../domain/types.js";
 import { formatReport } from "../report/formatReport.js";
-import { runSessionClarify } from "./sessionClarify.js";
 
 const scopeFor = (guildId: string | null, userId: string): string => guildId ?? `dm:${userId}`;
 const MAX_DISCORD_CONTENT_LENGTH = 2_000;
@@ -55,8 +53,6 @@ const chunkMessage = (content: string, maxLength = MAX_DISCORD_CONTENT_LENGTH): 
 
 interface DiscordBotOptions {
   enableMessageContentIntent: boolean;
-  clarifier: Clarifier;
-  clarifyCooldownMs: number;
 }
 
 export const createDiscordBot = (
@@ -216,53 +212,6 @@ export const createDiscordBot = (
         await interaction.reply(
           "Session started for active project. Messages in this channel are now captured.",
         );
-        return;
-      }
-
-      if (interaction.commandName === "session-clarify") {
-        const focus = interaction.options.getString("focus") ?? undefined;
-        console.info(
-          `[clarify] /session-clarify start scope=${scopeId} channel=${interaction.channelId} user=${interaction.user.id} focus=${focus ?? "(none)"}`,
-        );
-        await interaction.deferReply();
-
-        const result = await runSessionClarify({
-          engine,
-          clarifier: options.clarifier,
-          scopeId,
-          channelId: interaction.channelId,
-          focus,
-          cooldownMs: options.clarifyCooldownMs,
-        });
-
-        if (result.kind === "cooldown") {
-          console.info(
-            `[clarify] /session-clarify cooldown hit retryAfterSeconds=${result.retryAfterSeconds}`,
-          );
-          await interaction.editReply(
-            `Please wait ${result.retryAfterSeconds}s before running /session-clarify again.`,
-          );
-          return;
-        }
-
-        if (result.kind === "error") {
-          console.error(`[clarify] /session-clarify error: ${result.message}`);
-          await interaction.editReply(result.message);
-          return;
-        }
-
-        if (result.kind === "none") {
-          console.info("[clarify] /session-clarify no questions needed");
-          await interaction.editReply("No clarifying questions needed right now.");
-          return;
-        }
-
-        const content = [
-          "Clarifying questions:",
-          ...result.questions.map((question, index) => `${index + 1}. ${question}`),
-        ].join("\n");
-        console.info(`[clarify] /session-clarify posted questionCount=${result.questions.length}`);
-        await interaction.editReply(content);
         return;
       }
 

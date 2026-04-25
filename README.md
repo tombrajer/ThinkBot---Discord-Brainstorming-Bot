@@ -18,7 +18,6 @@ This bot is scoped as a brainstorming analyzer, not a coding agent.
 - `/attach-repo url`
 - `/project-memory`
 - `/start-session`
-- `/session-clarify focus?`
 - `/end-session`
 - `/forget-project project` (exact name)
 - `/forget-all-projects confirm:true`

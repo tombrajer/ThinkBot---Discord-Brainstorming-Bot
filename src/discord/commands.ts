@@ -29,15 +29,6 @@ export const commandBuilders = [
 
   // Session flow
   new SlashCommandBuilder().setName("start-session").setDescription("Start brainstorm session"),
-  new SlashCommandBuilder()
-    .setName("session-clarify")
-    .setDescription("Ask model-generated clarifying questions during an active session")
-    .addStringOption((opt) =>
-      opt
-        .setName("focus")
-        .setDescription("Optional focus hint for clarifying questions")
-        .setRequired(false),
-    ),
   new SlashCommandBuilder().setName("end-session").setDescription("End brainstorm session and analyze"),
 
   // Destructive actions

@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
   Analyzer,
-  ClarifyInput,
   Project,
   ProjectMemory,
   Session,
@@ -227,7 +226,6 @@ export class BrainstormingEngine {
       }
       activeSession.status = "ended";
       activeSession.endedAt = new Date().toISOString();
-      delete mutableState.clarifyRuns[this.clarifyRunKey(activeSession.id, activeSession.channelId)];
 
       const report: SessionReport = {
         id: randomUUID(),
@@ -274,78 +272,6 @@ export class BrainstormingEngine {
     );
   }
 
-  async buildClarifyInput(
-    scopeId: string,
-    channelId: string,
-    focus?: string,
-  ): Promise<ClarifyInput> {
-    const state = await this.store.read();
-    const activeProjectId = state.scopes[scopeId]?.activeProjectId;
-    if (!activeProjectId) {
-      throw new Error("No active project selected.");
-    }
-
-    const session = state.sessions.find(
-      (candidate) =>
-        candidate.scopeId === scopeId &&
-        candidate.channelId === channelId &&
-        candidate.projectId === activeProjectId &&
-        candidate.status === "active",
-    );
-    if (!session) {
-      throw new Error("No active session found for this channel.");
-    }
-
-    const project = state.projects.find((candidate) => candidate.id === activeProjectId);
-    if (!project) {
-      throw new Error("Project not found in this scope.");
-    }
-
-    const messages = state.messages
-      .filter((message) => message.sessionId === session.id)
-      .slice(-50);
-    const relevantPastContext = state.memories
-      .filter((memory) => memory.projectId === project.id)
-      .slice(-6);
-
-    return {
-      project,
-      session,
-      messages,
-      relevantPastContext,
-      focus: focus?.trim() || undefined,
-    };
-  }
-
-  async getSessionClarifyCooldownRemainingMs(
-    sessionId: string,
-    channelId: string,
-    cooldownMs: number,
-    nowMs = Date.now(),
-  ): Promise<number> {
-    const state = await this.store.read();
-    const key = this.clarifyRunKey(sessionId, channelId);
-    const lastRun = state.clarifyRuns[key];
-    if (!lastRun) {
-      return 0;
-    }
-    const elapsed = nowMs - lastRun;
-    if (elapsed >= cooldownMs) {
-      return 0;
-    }
-    return cooldownMs - elapsed;
-  }
-
-  async markSessionClarifyRun(
-    sessionId: string,
-    channelId: string,
-    atMs = Date.now(),
-  ): Promise<void> {
-    await this.store.update((state) => {
-      state.clarifyRuns[this.clarifyRunKey(sessionId, channelId)] = atMs;
-    });
-  }
-
   async deleteProject(scopeId: string, selector: string): Promise<void> {
     await this.store.update((state) => {
       const project = this.resolveProjectFromState(scopeId, selector, state.projects);
@@ -361,13 +287,6 @@ export class BrainstormingEngine {
       state.messages = state.messages.filter((message) => !removedSessionIds.has(message.sessionId));
       state.memories = state.memories.filter((memory) => memory.projectId !== projectId);
       state.reports = state.reports.filter((report) => !removedSessionIds.has(report.sessionId));
-      for (const sessionId of removedSessionIds) {
-        for (const key of Object.keys(state.clarifyRuns)) {
-          if (key.startsWith(`${sessionId}:`)) {
-            delete state.clarifyRuns[key];
-          }
-        }
-      }
 
       if (state.scopes[scopeId]?.activeProjectId === projectId) {
         const replacement = state.projects.find((project) => project.scopeId === scopeId);
@@ -399,13 +318,6 @@ export class BrainstormingEngine {
       state.messages = state.messages.filter((message) => !removedSessionIds.has(message.sessionId));
       state.memories = state.memories.filter((memory) => !projectIds.has(memory.projectId));
       state.reports = state.reports.filter((report) => !removedSessionIds.has(report.sessionId));
-      for (const sessionId of removedSessionIds) {
-        for (const key of Object.keys(state.clarifyRuns)) {
-          if (key.startsWith(`${sessionId}:`)) {
-            delete state.clarifyRuns[key];
-          }
-        }
-      }
 
       if (state.scopes[scopeId]) {
         state.scopes[scopeId].activeProjectId = undefined;
@@ -413,9 +325,5 @@ export class BrainstormingEngine {
 
       return deletedCount;
     });
-  }
-
-  private clarifyRunKey(sessionId: string, channelId: string): string {
-    return `${sessionId}:${channelId}`;
   }
 }

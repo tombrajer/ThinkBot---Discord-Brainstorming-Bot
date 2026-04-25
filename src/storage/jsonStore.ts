@@ -8,7 +8,6 @@ const defaultState = (): StoreState => ({
   messages: [],
   memories: [],
   reports: [],
-  clarifyRuns: {},
   scopes: {},
 });
 
@@ -34,7 +33,6 @@ export class JsonStore {
       messages: parsed.messages ?? [],
       memories: parsed.memories ?? [],
       reports: parsed.reports ?? [],
-      clarifyRuns: parsed.clarifyRuns ?? {},
       scopes: parsed.scopes ?? {},
     };
   }
