@@ -1,5 +1,13 @@
-import { Client, Events, GatewayIntentBits, MessageFlags } from "discord.js";
+import {
+  ChatInputCommandInteraction,
+  Client,
+  Events,
+  GatewayIntentBits,
+  InteractionReplyOptions,
+  MessageFlags,
+} from "discord.js";
 import { BrainstormingEngine } from "../core/brainstormingEngine.js";
+import { ProjectSetupFlow } from "./projectSetupFlow.js";
 import { formatReport } from "../report/formatReport.js";
 
 const scopeFor = (guildId: string | null, userId: string): string => guildId ?? `dm:${userId}`;
@@ -55,6 +63,77 @@ interface DiscordBotOptions {
   enableMessageContentIntent: boolean;
 }
 
+const formatActiveProject = (projectName?: string): string =>
+  projectName ? `Active project: ${projectName}` : "Active project: none";
+
+const replyWithChunks = async (
+  interaction: ChatInputCommandInteraction,
+  content: string,
+  ephemeral = true,
+) => {
+  const contentChunks = chunkMessage(content);
+  const firstReply: InteractionReplyOptions = ephemeral
+    ? { content: contentChunks[0], flags: MessageFlags.Ephemeral }
+    : { content: contentChunks[0] };
+
+  if (interaction.replied || interaction.deferred) {
+    await interaction.followUp(firstReply);
+  } else {
+    await interaction.reply(firstReply);
+  }
+
+  for (let index = 1; index < contentChunks.length; index += 1) {
+    await interaction.followUp(
+      ephemeral
+        ? { content: contentChunks[index], flags: MessageFlags.Ephemeral }
+        : { content: contentChunks[index] },
+    );
+  }
+};
+
+const buildProjectBrainContent = (
+  project: { name: string; description?: string; linkedRepoUrl?: string },
+  memory: { content: string }[],
+): string => {
+  const recentMemory = memory.slice(-5).map((item) => `- ${item.content}`);
+
+  return [
+    `Project: ${project.name}`,
+    `Description: ${project.description ?? "Not set."}`,
+    `Repo: ${project.linkedRepoUrl ?? "Not attached."}`,
+    "",
+    "Recent memory:",
+    ...(recentMemory.length > 0 ? recentMemory : ["- No memory entries yet."]),
+  ].join("\n");
+};
+
+const summarizeActiveDiscussion = async (
+  interaction: ChatInputCommandInteraction,
+  engine: BrainstormingEngine,
+  scopeId: string,
+) => {
+  const project = await engine.getActiveProject(scopeId);
+  if (!project) {
+    throw new Error("No active project selected.");
+  }
+
+  const startMs = Date.now();
+  console.info(
+    `[discord] summarize start scope=${scopeId} channel=${interaction.channelId} user=${interaction.user.id}`,
+  );
+  await interaction.deferReply();
+
+  const report = await engine.summarizeSession(scopeId, interaction.channelId, interaction.user.id);
+  const formatted = formatReport(report);
+  const contentChunks = chunkMessage(formatted);
+
+  await interaction.editReply(`Summary ready for ${project.name}. Sending report...`);
+  for (let index = 0; index < contentChunks.length; index += 1) {
+    await interaction.followUp(contentChunks[index]);
+  }
+  console.info(`[discord] summarize completed in ${Date.now() - startMs}ms`);
+};
+
 export const createDiscordBot = (
   engine: BrainstormingEngine,
   options: DiscordBotOptions,
@@ -72,6 +151,7 @@ export const createDiscordBot = (
   const client = new Client({
     intents,
   });
+  const projectSetupFlow = new ProjectSetupFlow(engine);
 
   client.on(Events.ClientReady, () => {
     console.log(
@@ -96,7 +176,12 @@ export const createDiscordBot = (
     if (interaction.isAutocomplete()) {
       const scopeId = scopeFor(interaction.guildId, interaction.user.id);
       try {
-        if (!["project-select", "forget-project"].includes(interaction.commandName)) {
+        const groupedProjectSelect =
+          interaction.commandName === "project" &&
+          interaction.options.getSubcommand(false) === "select";
+        const forgetProject = interaction.commandName === "forget-project";
+
+        if (!groupedProjectSelect && !forgetProject) {
           await interaction.respond([]);
           return;
         }
@@ -140,56 +225,89 @@ export const createDiscordBot = (
       return;
     }
 
-    if (!interaction.isChatInputCommand()) {
-      return;
-    }
-
     const scopeId = scopeFor(interaction.guildId, interaction.user.id);
 
     try {
-      if (interaction.commandName === "project-create") {
+      if (!interaction.isChatInputCommand()) {
+        if (interaction.isModalSubmit()) {
+          const handled = await projectSetupFlow.handleModalSubmit(interaction, scopeId);
+          if (handled) {
+            return;
+          }
+        }
+
+        if (interaction.isButton()) {
+          const handled = await projectSetupFlow.handleButton(interaction, scopeId);
+          if (handled) {
+            return;
+          }
+        }
+
+        return;
+      }
+
+      const projectSubcommand =
+        interaction.commandName === "project" ? interaction.options.getSubcommand() : undefined;
+      const sessionSubcommand =
+        interaction.commandName === "session" ? interaction.options.getSubcommand() : undefined;
+
+      if (
+        interaction.commandName === "project" && projectSubcommand === "create"
+      ) {
         const name = interaction.options.getString("name", true);
-        const description = interaction.options.getString("description") ?? undefined;
-        const project = await engine.createProject(scopeId, { name, description });
+        const guidedSetup = interaction.options.getBoolean("guided-setup", true);
+
+        if (guidedSetup) {
+          await projectSetupFlow.showBasicsModal(interaction, scopeId, name);
+          return;
+        }
+
+        const project = await engine.createProject(scopeId, { name });
+        const activeProject = await engine.getActiveProject(scopeId);
         await interaction.reply({
-          content: `Project created: ${project.name}`,
+          content: `Project created: ${project.name}. ${formatActiveProject(activeProject?.name)}`,
           flags: MessageFlags.Ephemeral,
         });
         return;
       }
 
-      if (interaction.commandName === "project-list") {
+      if (interaction.commandName === "project" && projectSubcommand === "list") {
         const projects = await engine.listProjects(scopeId);
         const active = await engine.getActiveProject(scopeId);
         const content =
           projects.length === 0
             ? "No projects yet."
-            : projects
-                .map(
+            : [
+                formatActiveProject(active?.name),
+                "",
+                ...projects.map(
                   (project) =>
                     `- ${project.name}${active?.id === project.id ? " [active]" : ""}`,
-                )
-                .join("\n");
+                ),
+              ].join("\n");
         await interaction.reply({ content, flags: MessageFlags.Ephemeral });
         return;
       }
 
-      if (interaction.commandName === "project-select") {
+      if (interaction.commandName === "project" && projectSubcommand === "select") {
         const selector = interaction.options.getString("project", true);
         const project = await engine.selectProject(scopeId, selector);
         await interaction.reply({
-          content: `Active project set to ${project.name}.`,
+          content: `Selected ${project.name}. ${formatActiveProject(project.name)}`,
           flags: MessageFlags.Ephemeral,
         });
         return;
       }
 
-      if (interaction.commandName === "project-active") {
-        const project = await engine.getActiveProject(scopeId);
-        const content = project
-          ? `Active project: ${project.name}`
-          : "No active project selected.";
-        await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+      if (interaction.commandName === "project" && projectSubcommand === "exit") {
+        const activeProject = await engine.getActiveProject(scopeId);
+        await engine.exitProject(scopeId);
+        await interaction.reply({
+          content: activeProject
+            ? `Exited ${activeProject.name}. ${formatActiveProject()}`
+            : `No active project to exit. ${formatActiveProject()}`,
+          flags: MessageFlags.Ephemeral,
+        });
         return;
       }
 
@@ -207,59 +325,25 @@ export const createDiscordBot = (
         return;
       }
 
-      if (interaction.commandName === "start-session") {
-        await engine.startSession(scopeId, interaction.channelId, interaction.user.id);
-        await interaction.reply(
-          "Session started for active project. Messages in this channel are now captured.",
+      if (interaction.commandName === "project" && projectSubcommand === "brain") {
+        const project = await engine.getActiveProject(scopeId);
+        if (!project) {
+          throw new Error("No active project selected.");
+        }
+        const memory = await engine.getProjectMemory(project.id);
+        await replyWithChunks(
+          interaction,
+          [formatActiveProject(project.name), "", buildProjectBrainContent(project, memory)].join("\n"),
         );
         return;
       }
 
-      if (interaction.commandName === "end-session") {
-        const startMs = Date.now();
-        console.info(
-          `[discord] /end-session start scope=${scopeId} channel=${interaction.channelId} user=${interaction.user.id}`,
-        );
-        await interaction.deferReply();
-        console.info("[discord] /end-session deferred interaction successfully");
-
-        const report = await engine.endSession(scopeId, interaction.channelId);
-        const formatted = formatReport(report);
-        const contentChunks = chunkMessage(formatted);
-
-        console.info(
-          `[discord] /end-session prepared ${contentChunks.length} chunk(s), firstChunkLength=${contentChunks[0]?.length ?? 0}`,
-        );
-
-        try {
-          await interaction.editReply("Analysis complete. Sending report...");
-          console.info("[discord] /end-session editReply status message sent");
-        } catch (sendError) {
-          const msg = sendError instanceof Error ? sendError.message : String(sendError);
-          console.error(`[discord] /end-session editReply failed: ${msg}`);
-          throw sendError;
-        }
-
-        for (let index = 0; index < contentChunks.length; index += 1) {
-          const chunk = contentChunks[index];
-          try {
-            await interaction.followUp(chunk);
-            console.info(
-              `[discord] /end-session followUp sent chunk=${index + 1}/${contentChunks.length} length=${chunk.length}`,
-            );
-          } catch (sendError) {
-            const msg = sendError instanceof Error ? sendError.message : String(sendError);
-            console.error(
-              `[discord] /end-session followUp failed chunk=${index + 1}/${contentChunks.length}: ${msg}`,
-            );
-            throw sendError;
-          }
-        }
-        console.info(`[discord] /end-session completed in ${Date.now() - startMs}ms`);
+      if (interaction.commandName === "session" && sessionSubcommand === "summarize") {
+        await summarizeActiveDiscussion(interaction, engine, scopeId);
         return;
       }
 
-      if (interaction.commandName === "project-memory") {
+      if (interaction.commandName === "project" && projectSubcommand === "memory") {
         const project = await engine.getActiveProject(scopeId);
         if (!project) {
           throw new Error("No active project selected.");
@@ -267,13 +351,13 @@ export const createDiscordBot = (
         const memory = await engine.getProjectMemory(project.id);
         const content =
           memory.length === 0
-            ? "No memory entries yet."
-            : memory.slice(-10).map((item) => `- ${item.content}`).join("\n");
-        const contentChunks = chunkMessage(content);
-        await interaction.reply({ content: contentChunks[0], flags: MessageFlags.Ephemeral });
-        for (let index = 1; index < contentChunks.length; index += 1) {
-          await interaction.followUp({ content: contentChunks[index], flags: MessageFlags.Ephemeral });
-        }
+            ? `${formatActiveProject(project.name)}\n\nNo memory entries yet.`
+            : [
+                formatActiveProject(project.name),
+                "",
+                ...memory.slice(-10).map((item) => `- ${item.content}`),
+              ].join("\n");
+        await replyWithChunks(interaction, content);
         return;
       }
 
@@ -306,8 +390,10 @@ export const createDiscordBot = (
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
+      const interactionName =
+        "commandName" in interaction ? interaction.commandName : interaction.customId;
       console.error(
-        `[discord] Interaction handler exception command=${interaction.commandName} scope=${scopeId} channel=${interaction.channelId}: ${message}`,
+        `[discord] Interaction handler exception command=${interactionName} scope=${scopeId} channel=${interaction.channelId}: ${message}`,
       );
       try {
         if (interaction.replied || interaction.deferred) {
@@ -318,7 +404,7 @@ export const createDiscordBot = (
       } catch (sendError) {
         const sendMessage = sendError instanceof Error ? sendError.message : String(sendError);
         console.error(
-          `[discord] Failed to send interaction error response command=${interaction.commandName}: ${sendMessage}`,
+          `[discord] Failed to send interaction error response command=${interactionName}: ${sendMessage}`,
         );
       }
     }

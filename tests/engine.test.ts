@@ -74,6 +74,63 @@ describe("BrainstormingEngine", () => {
     ).resolves.toBeTruthy();
   });
 
+  it("stores structured project brain fields with source metadata", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      new HeuristicAnalyzer(),
+    );
+
+    const project = await engine.createProject("guild-1", {
+      name: "ThinkBot",
+      description: "Discord brainstorming bot",
+      brain: {
+        mainGoal: {
+          value: "Make brainstorming always available",
+          source: "user",
+        },
+        targetUsers: {
+          value: ["solo builders"],
+          source: "ai-suggested",
+        },
+      },
+    });
+
+    expect(project.brain?.mainGoal?.value).toBe("Make brainstorming always available");
+    expect(project.brain?.targetUsers?.source).toBe("ai-suggested");
+  });
+
+  it("builds a reviewed project draft and saves skipped fields as ai-suggested", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      new HeuristicAnalyzer(),
+    );
+
+    const draft = await engine.prepareProjectBrainDraft("guild-1", {
+      name: "ThinkBot",
+      linkedRepoUrl: "",
+      description: "Discord brainstorming bot",
+      mainGoal: "",
+      targetUsers: [],
+      problemsSolved: ["Messy brainstorming capture"],
+      ideas: [],
+      constraints: [],
+      techStack: ["TypeScript", "Discord.js"],
+      decisions: [],
+      notes: "",
+    });
+
+    expect(draft.suggestions.mainGoal).toBeTruthy();
+    expect(draft.review.mainGoal?.source).toBe("ai-suggested");
+    expect(draft.review.techStack?.source).toBe("ai-suggested");
+    expect(draft.review.techStack?.value.length).toBeGreaterThan(0);
+
+    const project = await engine.createProjectFromDraft("guild-1", draft, true);
+
+    expect(project.brain?.mainGoal?.source).toBe("ai-suggested");
+    expect(project.brain?.description?.source).toBe("ai-suggested");
+    expect(project.description).toContain("ThinkBot");
+  });
+
   it("runs session lifecycle and stores report + memory", async () => {
     const engine = new BrainstormingEngine(
       new JsonStore(storePath),
@@ -101,6 +158,76 @@ describe("BrainstormingEngine", () => {
 
     const memory = await engine.getProjectMemory(project.id);
     expect(memory.length).toBeGreaterThan(0);
+  });
+
+  it("creates an implicit session when an active project receives a message", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      new HeuristicAnalyzer(),
+    );
+
+    const project = await engine.createProject("guild-1", {
+      name: "Implicit Flow",
+      description: "desc",
+    });
+    await engine.selectProject("guild-1", project.id);
+
+    const captured = await engine.captureMessage(
+      "guild-1",
+      "channel-1",
+      "user-1",
+      "The bot should work without start-session.",
+    );
+
+    expect(captured).toBeTruthy();
+
+    const session = await engine.getActiveSession("guild-1", "channel-1");
+    expect(session?.status).toBe("active");
+    expect(session?.projectId).toBe(project.id);
+  });
+
+  it("summarizes the current discussion without leaving the project inactive", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      new HeuristicAnalyzer(),
+    );
+
+    const project = await engine.createProject("guild-1", {
+      name: "Summaries",
+      description: "desc",
+    });
+    await engine.selectProject("guild-1", project.id);
+
+    await engine.captureMessage("guild-1", "channel-1", "user-1", "Keep summaries concise.");
+    const originalSession = await engine.getActiveSession("guild-1", "channel-1");
+
+    const report = await engine.summarizeSession("guild-1", "channel-1", "user-1");
+
+    expect(report.sessionGoal.length).toBeGreaterThan(0);
+
+    const rolledSession = await engine.getActiveSession("guild-1", "channel-1");
+    expect(rolledSession?.status).toBe("active");
+    expect(rolledSession?.id).not.toBe(originalSession?.id);
+
+    const memory = await engine.getProjectMemory(project.id);
+    expect(memory.length).toBeGreaterThan(0);
+  });
+
+  it("clears the active project when exiting project mode", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      new HeuristicAnalyzer(),
+    );
+
+    await engine.createProject("guild-1", {
+      name: "Exit Test",
+      description: "desc",
+    });
+
+    await engine.exitProject("guild-1");
+
+    const active = await engine.getActiveProject("guild-1");
+    expect(active).toBeUndefined();
   });
 
   it("rejects a second active session for the same project + channel", async () => {

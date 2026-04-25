@@ -6,8 +6,9 @@
 
 Discord bot for project brainstorming sessions with:
 - Multi-project management
+- Project-based activation
 - Per-project session capture
-- End-of-session structured analysis
+- On-demand session summaries
 - Per-project memory across sessions
 - Optional repository metadata linking
 
@@ -15,16 +16,52 @@ This bot is scoped as a brainstorming analyzer, not a coding agent.
 
 ## Commands
 
-- `/project-create name description?`
-- `/project-list`
-- `/project-active`
-- `/project-select project` (exact name)
+- `/project create name guided-setup`
+- `/project list`
+- `/project select project` (exact name)
+- `/project exit`
+- `/project brain`
+- `/project memory`
+- `/session summarize`
 - `/attach-repo url`
-- `/project-memory`
-- `/start-session`
-- `/end-session`
 - `/forget-project project` (exact name)
 - `/forget-all-projects confirm:true`
+
+## Main flow
+
+1. Create or select a project.
+2. Once a project is active, ThinkBot can capture project-relevant chat in that scope when message content intent is enabled.
+3. Use `/session summarize` any time you want a structured summary of the recent discussion.
+4. Use `/project exit` to leave the current project and stop project-aware behavior.
+
+If no project is active, the bot stays passive outside explicit commands.
+
+## Guided project setup
+
+`/project create` now starts with two inline fields:
+- `name`
+- `guided-setup` (`true` or `false`)
+
+If `guided-setup` is `true`, ThinkBot opens the guided setup questions.
+If `guided-setup` is `false`, it creates the project immediately and makes it active.
+
+The flow collects:
+- project name
+- GitHub repo URL (optional)
+- project description
+- main goal
+- existing ideas
+- constraints
+- tech stack under consideration
+- prior decisions
+- extra notes
+
+You can leave fields blank. ThinkBot will suggest reasonable values for skipped fields, clearly mark them as suggestions, and let you:
+- save with suggestions
+- save without suggestions
+- edit your answers before saving
+
+Saved projects now keep a structured project brain with source metadata so later features can distinguish direct user input from AI-suggested setup fields.
 
 ## Quick start
 
@@ -112,7 +149,7 @@ npm run build
 - `Used disallowed intents`
   - Cause: `Message Content Intent` is requested but not enabled for your bot in Discord settings.
   - Fix option A: enable it in the Discord portal and set `ENABLE_MESSAGE_CONTENT_INTENT=true`.
-  - Fix option B: keep `ENABLE_MESSAGE_CONTENT_INTENT=false` (bot starts, but it will not ingest normal message content).
+  - Fix option B: keep `ENABLE_MESSAGE_CONTENT_INTENT=false` (bot starts, but it will not ingest normal message content for active projects).
 
 - `UNABLE_TO_VERIFY_LEAF_SIGNATURE`
   - Cause: TLS interception (for example Norton SSL/TLS scanning) and Node does not trust that local root CA by default.

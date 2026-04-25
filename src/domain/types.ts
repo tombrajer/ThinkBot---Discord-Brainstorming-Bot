@@ -1,10 +1,66 @@
 export type SessionStatus = "active" | "ended";
+export type BrainFieldSource = "user" | "ai-suggested";
+
+export interface ProjectBrainField<T> {
+  value: T;
+  source: BrainFieldSource;
+}
+
+export interface ProjectBrain {
+  description?: ProjectBrainField<string>;
+  mainGoal?: ProjectBrainField<string>;
+  targetUsers?: ProjectBrainField<string[]>;
+  problemsSolved?: ProjectBrainField<string[]>;
+  ideas?: ProjectBrainField<string[]>;
+  constraints?: ProjectBrainField<string[]>;
+  techStack?: ProjectBrainField<string[]>;
+  decisions?: ProjectBrainField<string[]>;
+  notes?: ProjectBrainField<string>;
+}
+
+export interface ProjectBrainDraftValues {
+  name: string;
+  linkedRepoUrl: string;
+  description: string;
+  mainGoal: string;
+  targetUsers: string[];
+  problemsSolved: string[];
+  ideas: string[];
+  constraints: string[];
+  techStack: string[];
+  decisions: string[];
+  notes: string;
+}
+
+export interface ProjectBrainSuggestionInput {
+  projectName: string;
+  userInput: Omit<ProjectBrainDraftValues, "name" | "linkedRepoUrl">;
+}
+
+export interface ProjectBrainSuggestionOutput {
+  description: string;
+  mainGoal: string;
+  targetUsers: string[];
+  problemsSolved: string[];
+  ideas: string[];
+  constraints: string[];
+  techStack: string[];
+  decisions: string[];
+  notes: string;
+}
+
+export interface ProjectBrainDraft {
+  input: ProjectBrainDraftValues;
+  suggestions: ProjectBrainSuggestionOutput;
+  review: ProjectBrain;
+}
 
 export interface Project {
   id: string;
   scopeId: string;
   name: string;
   description?: string;
+  brain?: ProjectBrain;
   linkedRepoUrl?: string;
   createdAt: string;
   updatedAt: string;
@@ -75,4 +131,5 @@ export interface AnalysisInput {
 
 export interface Analyzer {
   analyze(input: AnalysisInput): Promise<Omit<SessionReport, "id" | "sessionId">>;
+  suggestProjectBrain(input: ProjectBrainSuggestionInput): Promise<ProjectBrainSuggestionOutput>;
 }

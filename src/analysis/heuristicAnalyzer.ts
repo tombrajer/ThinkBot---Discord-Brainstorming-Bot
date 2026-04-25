@@ -1,4 +1,9 @@
-import { AnalysisInput, Analyzer } from "../domain/types.js";
+import {
+  AnalysisInput,
+  Analyzer,
+  ProjectBrainSuggestionInput,
+  ProjectBrainSuggestionOutput,
+} from "../domain/types.js";
 
 const STOP_WORDS = new Set([
   "the",
@@ -38,6 +43,124 @@ const topKeywords = (messages: string[]): string[] => {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5)
     .map((entry) => entry[0]);
+};
+
+const normalizeText = (value: string): string => value.trim();
+const normalizeList = (values: string[]): string[] =>
+  values.map((value) => value.trim()).filter(Boolean);
+const titleCase = (value: string): string =>
+  value
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+
+const pickPrimaryUser = (input: ProjectBrainSuggestionInput): string => {
+  const existing = normalizeList(input.userInput.targetUsers)[0];
+  if (existing) {
+    return existing;
+  }
+
+  const context = `${input.projectName} ${input.userInput.description}`.toLowerCase();
+  if (context.includes("discord")) {
+    return "Discord communities";
+  }
+  if (context.includes("team") || context.includes("collab")) {
+    return "small teams";
+  }
+  if (context.includes("founder") || context.includes("startup")) {
+    return "founders exploring new product ideas";
+  }
+  return "people exploring an early product idea";
+};
+
+const pickPrimaryProblem = (input: ProjectBrainSuggestionInput): string => {
+  const existing = normalizeList(input.userInput.problemsSolved)[0];
+  if (existing) {
+    return existing;
+  }
+
+  const description = normalizeText(input.userInput.description);
+  if (description) {
+    return description.replace(/\.$/, "");
+  }
+
+  return `turn unclear brainstorming for ${input.projectName} into something structured`;
+};
+
+const buildSuggestions = (input: ProjectBrainSuggestionInput): ProjectBrainSuggestionOutput => {
+  const primaryUser = pickPrimaryUser(input);
+  const primaryProblem = pickPrimaryProblem(input);
+  const description = normalizeText(input.userInput.description);
+  const mainGoal = normalizeText(input.userInput.mainGoal);
+  const notes = normalizeText(input.userInput.notes);
+  const ideaHints = normalizeList(input.userInput.ideas);
+  const constraintHints = normalizeList(input.userInput.constraints);
+  const decisionHints = normalizeList(input.userInput.decisions);
+  const techHints = normalizeList(input.userInput.techStack);
+  const stackContext = [
+    input.projectName,
+    description,
+    mainGoal,
+    ...techHints,
+    ...ideaHints,
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  const inferTechStack = (): string[] => {
+    if (stackContext.includes("discord")) {
+      return ["TypeScript", "discord.js", "JSON storage", "Ollama"];
+    }
+    if (
+      stackContext.includes("web") ||
+      stackContext.includes("website") ||
+      stackContext.includes("web page") ||
+      stackContext.includes("landing page")
+    ) {
+      return ["TypeScript", "React or Next.js", "Tailwind CSS", "Vercel or Netlify"];
+    }
+    if (stackContext.includes("mobile")) {
+      return ["React Native", "TypeScript", "Expo", "SQLite or Supabase"];
+    }
+    if (stackContext.includes("api") || stackContext.includes("backend")) {
+      return ["TypeScript", "Node.js", "Express or Fastify", "PostgreSQL"];
+    }
+    return techHints.length > 0
+      ? techHints.map((item) => titleCase(item))
+      : ["TypeScript", "Node.js", "JSON storage"];
+  };
+
+  return {
+    description: description
+      ? `${input.projectName} focuses on ${description.replace(/\.$/, "")}.`
+      : `${input.projectName} is focused on helping ${primaryUser.toLowerCase()} ${primaryProblem}.`,
+    mainGoal: mainGoal
+      ? mainGoal.replace(/\.$/, "")
+      : `Help ${primaryUser.toLowerCase()} ${primaryProblem} with a workflow that stays easy to use.`,
+    targetUsers: input.userInput.targetUsers.length > 0 ? [] : [primaryUser],
+    problemsSolved: input.userInput.problemsSolved.length > 0 ? [] : [primaryProblem],
+    ideas:
+      input.userInput.ideas.length > 0
+        ? ideaHints.map((idea) => `${idea.replace(/\.$/, "")}.`)
+        : [
+            "Capture messy discussion in one place and turn it into a clear summary.",
+            "Keep the first version narrow around one repeated user workflow.",
+          ],
+    constraints:
+      input.userInput.constraints.length > 0
+        ? constraintHints.map((constraint) => constraint.replace(/\.$/, ""))
+        : ["Keep the first version lightweight and focused on the core workflow."],
+    techStack: inferTechStack(),
+    decisions:
+      input.userInput.decisions.length > 0
+        ? decisionHints.map((decision) => decision.replace(/\.$/, ""))
+        : [],
+    notes:
+      notes
+        ? notes
+        : "Suggestion: keep the setup incomplete-friendly so the project can improve over time.",
+  };
 };
 
 export class HeuristicAnalyzer implements Analyzer {
@@ -89,5 +212,11 @@ export class HeuristicAnalyzer implements Analyzer {
           : ["No prior project memory found yet."],
       repoObservations: [],
     };
+  }
+
+  async suggestProjectBrain(
+    input: ProjectBrainSuggestionInput,
+  ): Promise<ProjectBrainSuggestionOutput> {
+    return buildSuggestions(input);
   }
 }

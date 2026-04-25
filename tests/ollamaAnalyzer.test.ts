@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Analyzer, AnalysisInput, SessionReport } from "../src/domain/types.js";
+import {
+  Analyzer,
+  AnalysisInput,
+  ProjectBrainSuggestionInput,
+  ProjectBrainSuggestionOutput,
+  SessionReport,
+} from "../src/domain/types.js";
 import { OllamaAnalyzer } from "../src/analysis/ollamaAnalyzer.js";
 
 const makeInput = (): AnalysisInput => ({
@@ -47,7 +53,20 @@ const makeFallbackAnalyzer = () => {
   };
 
   const analyze = vi.fn(async () => fallbackReport);
-  const analyzer: Analyzer = { analyze };
+  const suggestProjectBrain = vi.fn(
+    async (_input: ProjectBrainSuggestionInput): Promise<ProjectBrainSuggestionOutput> => ({
+      description: "",
+      mainGoal: "Fallback suggested goal",
+      targetUsers: ["Fallback users"],
+      problemsSolved: ["Fallback problem"],
+      ideas: ["Fallback idea"],
+      constraints: [],
+      techStack: [],
+      decisions: [],
+      notes: "",
+    }),
+  );
+  const analyzer: Analyzer = { analyze, suggestProjectBrain };
   return { analyzer, analyze, fallbackReport };
 };
 

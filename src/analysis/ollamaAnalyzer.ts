@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { AnalysisInput, Analyzer, SessionReport } from "../domain/types.js";
+import {
+  AnalysisInput,
+  Analyzer,
+  ProjectBrainSuggestionInput,
+  ProjectBrainSuggestionOutput,
+  SessionReport,
+} from "../domain/types.js";
 import { parseModelJson } from "./modelJsonParser.js";
 
 const coerceToString = (value: unknown): string => {
@@ -39,6 +45,18 @@ const reportSchema = z.object({
   suggestions: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
   relevantPastContext: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
   repoObservations: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+});
+
+const projectBrainSuggestionSchema = z.object({
+  description: z.preprocess((value) => coerceToString(value), z.string()).default(""),
+  mainGoal: z.preprocess((value) => coerceToString(value), z.string()).default(""),
+  targetUsers: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  problemsSolved: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  ideas: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  constraints: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  techStack: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  decisions: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  notes: z.preprocess((value) => coerceToString(value), z.string()).default(""),
 });
 
 const ensureNonEmpty = (items: string[], fallback: string): string[] => {
@@ -230,6 +248,20 @@ const buildFailureReport = (reason: string): Omit<SessionReport, "id" | "session
   };
 };
 
+const normalizeProjectBrainSuggestions = (
+  suggestions: z.infer<typeof projectBrainSuggestionSchema>,
+): ProjectBrainSuggestionOutput => ({
+  description: suggestions.description.trim(),
+  mainGoal: suggestions.mainGoal.trim(),
+  targetUsers: suggestions.targetUsers.map((item) => item.trim()).filter(Boolean),
+  problemsSolved: suggestions.problemsSolved.map((item) => item.trim()).filter(Boolean),
+  ideas: suggestions.ideas.map((item) => item.trim()).filter(Boolean),
+  constraints: suggestions.constraints.map((item) => item.trim()).filter(Boolean),
+  techStack: suggestions.techStack.map((item) => item.trim()).filter(Boolean),
+  decisions: suggestions.decisions.map((item) => item.trim()).filter(Boolean),
+  notes: suggestions.notes.trim(),
+});
+
 interface OllamaAnalyzerOptions {
   baseUrl: string;
   model: string;
@@ -364,7 +396,89 @@ export class OllamaAnalyzer implements Analyzer {
     }
   }
 
+  async suggestProjectBrain(
+    input: ProjectBrainSuggestionInput,
+  ): Promise<ProjectBrainSuggestionOutput> {
+    const startedAt = Date.now();
+    try {
+      const content = await this.requestOllamaJsonContent(
+        this.buildProjectBrainPrompt(input),
+        [
+          "You improve project setup drafts for a Discord brainstorming bot.",
+          "Return exactly one JSON object and no markdown.",
+          "Only suggest fields that are missing or weak.",
+          "Use short, practical suggestions.",
+          "Never invent hard facts such as confirmed deadlines, repositories, or exact tech stacks.",
+          "Set already-provided fields to empty string or empty array instead of rewriting them.",
+        ].join(" "),
+      );
+      const parsed = parseModelJson(content);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Project brain suggestion response was not an object.");
+      }
+      return normalizeProjectBrainSuggestions(
+        projectBrainSuggestionSchema.parse(parsed),
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? `${error.name}: ${error.message}` : "Unknown analyzer error";
+      console.warn(
+        `[ollama] Falling back to heuristic project suggestions after ${Date.now() - startedAt}ms: ${message}`,
+      );
+      return this.options.fallbackAnalyzer.suggestProjectBrain(input);
+    }
+  }
+
   private async analyzeWithOllama(input: AnalysisInput): Promise<unknown> {
+    const content = await this.requestOllamaJsonContent(
+      this.buildPrompt(input),
+      [
+        "You summarize brainstorming sessions for a Discord bot.",
+        "Respond with exactly one JSON object and no markdown.",
+        "Do not include code fences, labels, or commentary outside JSON.",
+        "Be practical, specific, and idea-generative.",
+        "Suggestions must contain concrete implementation directions and novel feature ideas, not generic advice.",
+      ].join(" "),
+    );
+
+    const rawPreview = content.replace(/\s+/g, " ").slice(0, 240);
+    console.info(`[ollama] Raw response preview: ${rawPreview}`);
+
+    try {
+      const parsed = parseModelJson(content);
+      let parsedPreview = "";
+      try {
+        parsedPreview = JSON.stringify(parsed).replace(/\s+/g, " ").slice(0, 240);
+      } catch {
+        parsedPreview = "(unable to serialize parsed preview)";
+      }
+      console.info(`[ollama] Parsed response preview: ${parsedPreview}`);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed;
+      }
+      if (Array.isArray(parsed)) {
+        console.warn(
+          "[ollama] Parsed JSON root is an array; coercing array content into report shape.",
+        );
+        return buildReportFromArray(parsed);
+      }
+      console.warn(
+        "[ollama] Parsed JSON root is not an object; coercing raw response into report shape.",
+      );
+      return buildReportFromPlainText(content);
+    } catch (parseError) {
+      const message = parseError instanceof Error ? parseError.message : "Unknown parse error";
+      console.warn(
+        `[ollama] JSON parse failed, using plain-text salvage path. reason=${message}`,
+      );
+      const salvaged = buildReportFromPlainText(content);
+      const salvagedPreview = JSON.stringify(salvaged).replace(/\s+/g, " ").slice(0, 240);
+      console.info(`[ollama] Salvaged response preview: ${salvagedPreview}`);
+      return salvaged;
+    }
+  }
+
+  private async requestOllamaJsonContent(userPrompt: string, systemPrompt: string): Promise<string> {
     const requestStartedAt = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
@@ -372,7 +486,6 @@ export class OllamaAnalyzer implements Analyzer {
     let requestStatus = "ok";
 
     try {
-      const userPrompt = this.buildPrompt(input);
       const requestBase = {
         model: this.options.model,
         stream: false,
@@ -384,13 +497,7 @@ export class OllamaAnalyzer implements Analyzer {
         messages: [
           {
             role: "system",
-            content: [
-              "You summarize brainstorming sessions for a Discord bot.",
-              "Respond with exactly one JSON object and no markdown.",
-              "Do not include code fences, labels, or commentary outside JSON.",
-              "Be practical, specific, and idea-generative.",
-              "Suggestions must contain concrete implementation directions and novel feature ideas, not generic advice.",
-            ].join(" "),
+            content: systemPrompt,
           },
           {
             role: "user",
@@ -478,41 +585,7 @@ export class OllamaAnalyzer implements Analyzer {
         throw new Error(`Ollama returned an empty response. Payload keys: ${payloadKeys || "(none)"}`);
       }
 
-      const rawPreview = content.replace(/\s+/g, " ").slice(0, 240);
-      console.info(`[ollama] Raw response preview: ${rawPreview}`);
-
-      try {
-        const parsed = parseModelJson(content);
-        let parsedPreview = "";
-        try {
-          parsedPreview = JSON.stringify(parsed).replace(/\s+/g, " ").slice(0, 240);
-        } catch {
-          parsedPreview = "(unable to serialize parsed preview)";
-        }
-        console.info(`[ollama] Parsed response preview: ${parsedPreview}`);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          return parsed;
-        }
-        if (Array.isArray(parsed)) {
-          console.warn(
-            "[ollama] Parsed JSON root is an array; coercing array content into report shape.",
-          );
-          return buildReportFromArray(parsed);
-        }
-        console.warn(
-          "[ollama] Parsed JSON root is not an object; coercing raw response into report shape.",
-        );
-        return buildReportFromPlainText(content);
-      } catch (parseError) {
-        const message = parseError instanceof Error ? parseError.message : "Unknown parse error";
-        console.warn(
-          `[ollama] JSON parse failed, using plain-text salvage path. reason=${message}`,
-        );
-        const salvaged = buildReportFromPlainText(content);
-        const salvagedPreview = JSON.stringify(salvaged).replace(/\s+/g, " ").slice(0, 240);
-        console.info(`[ollama] Salvaged response preview: ${salvagedPreview}`);
-        return salvaged;
-      }
+      return content;
     } catch (error) {
       requestStatus = "error";
       throw formatRequestError(error, baseUrl, this.options.timeoutMs);
@@ -561,6 +634,29 @@ export class OllamaAnalyzer implements Analyzer {
       "",
       "Relevant past context:",
       memory || "No prior memory.",
+    ].join("\n");
+  }
+
+  private buildProjectBrainPrompt(input: ProjectBrainSuggestionInput): string {
+    return [
+      "Return one JSON object with these keys:",
+      "description, mainGoal, targetUsers, problemsSolved, ideas, constraints, techStack, decisions, notes",
+      "Rules:",
+      "- Use plain strings and arrays of strings only.",
+      "- If the user already provided a field, return an empty string or empty array for that field.",
+      "- Keep suggestions concise, practical, and safe to mark as suggestions.",
+      "- Do not invent exact deadlines, repositories, metrics, or confirmed technologies.",
+      "",
+      `Project name: ${input.projectName}`,
+      `Description: ${input.userInput.description || "missing"}`,
+      `Main goal: ${input.userInput.mainGoal || "missing"}`,
+      `Target users: ${input.userInput.targetUsers.join("; ") || "missing"}`,
+      `Problems solved: ${input.userInput.problemsSolved.join("; ") || "missing"}`,
+      `Ideas: ${input.userInput.ideas.join("; ") || "missing"}`,
+      `Constraints: ${input.userInput.constraints.join("; ") || "missing"}`,
+      `Tech stack: ${input.userInput.techStack.join("; ") || "missing"}`,
+      `Decisions: ${input.userInput.decisions.join("; ") || "missing"}`,
+      `Notes: ${input.userInput.notes || "missing"}`,
     ].join("\n");
   }
 }
