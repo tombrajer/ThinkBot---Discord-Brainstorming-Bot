@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="./assets/readme-banner.svg" alt="ThinkBot banner" width="100%" />
+</div>
+
 # Brainstorming Discord Bot
 
 Discord bot for project brainstorming sessions with:
