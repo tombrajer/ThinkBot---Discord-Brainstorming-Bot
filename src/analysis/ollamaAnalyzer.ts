@@ -2,8 +2,11 @@ import { z } from "zod";
 import {
   AnalysisInput,
   Analyzer,
+  BrainstormReport,
+  ProjectContextInput,
   ProjectBrainSuggestionInput,
   ProjectBrainSuggestionOutput,
+  ProjectSummaryReport,
   SessionReport,
 } from "../domain/types.js";
 import { parseModelJson } from "./modelJsonParser.js";
@@ -57,6 +60,25 @@ const projectBrainSuggestionSchema = z.object({
   techStack: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
   decisions: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
   notes: z.preprocess((value) => coerceToString(value), z.string()).default(""),
+});
+
+const projectSummarySchema = z.object({
+  currentDirection: z.preprocess((value) => coerceToString(value), z.string()),
+  importantThemes: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  recentChanges: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  openIssues: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  currentNextFocus: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  relevantPastContext: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  repoObservations: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+});
+
+const brainstormSchema = z.object({
+  coreIdeas: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  variationsTwists: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  gapsRisks: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  nextSteps: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  assumptions: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
+  repoObservations: z.preprocess((value) => coerceToStringArray(value), z.array(z.string())).default([]),
 });
 
 const ensureNonEmpty = (items: string[], fallback: string): string[] => {
@@ -262,6 +284,44 @@ const normalizeProjectBrainSuggestions = (
   notes: suggestions.notes.trim(),
 });
 
+const normalizeProjectSummary = (
+  report: z.infer<typeof projectSummarySchema>,
+): ProjectSummaryReport => ({
+  currentDirection: report.currentDirection.trim() || "No clear current direction captured.",
+  importantThemes: ensureNonEmpty(report.importantThemes, "No clear themes identified."),
+  recentChanges: ensureNonEmpty(report.recentChanges, "No recent changes were captured."),
+  openIssues: ensureNonEmpty(report.openIssues, "No open issues were called out."),
+  currentNextFocus: ensureNonEmpty(
+    report.currentNextFocus,
+    "Define the next concrete project move before expanding scope.",
+  ),
+  relevantPastContext: ensureNonEmpty(
+    report.relevantPastContext,
+    "No prior project memory found yet.",
+  ),
+  repoObservations: report.repoObservations.map((item) => item.trim()).filter(Boolean),
+});
+
+const normalizeBrainstorm = (
+  report: z.infer<typeof brainstormSchema>,
+): BrainstormReport => ({
+  coreIdeas: ensureNonEmpty(report.coreIdeas, "Define one narrow feature worth validating."),
+  variationsTwists: ensureNonEmpty(
+    report.variationsTwists,
+    "Try a smaller first-version variation before committing to a broader build.",
+  ),
+  gapsRisks: ensureNonEmpty(
+    report.gapsRisks,
+    "The idea still needs a sharper boundary to avoid expanding too quickly.",
+  ),
+  nextSteps: ensureNonEmpty(
+    report.nextSteps,
+    "Pick the smallest buildable slice and define how to judge success.",
+  ),
+  assumptions: report.assumptions.map((item) => item.trim()).filter(Boolean),
+  repoObservations: report.repoObservations.map((item) => item.trim()).filter(Boolean),
+});
+
 interface OllamaAnalyzerOptions {
   baseUrl: string;
   model: string;
@@ -396,6 +456,61 @@ export class OllamaAnalyzer implements Analyzer {
     }
   }
 
+  async summarizeProject(input: ProjectContextInput): Promise<ProjectSummaryReport> {
+    const startedAt = Date.now();
+    try {
+      const content = await this.requestOllamaJsonContent(
+        this.buildProjectSummaryPrompt(input),
+        [
+          "You summarize the current state of a project for a Discord bot.",
+          "Return exactly one JSON object and no markdown.",
+          "Be concise, practical, and project-specific.",
+          "Do not drift into generic ideation.",
+        ].join(" "),
+      );
+      const parsed = parseModelJson(content);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Project summary response was not an object.");
+      }
+      return normalizeProjectSummary(projectSummarySchema.parse(parsed));
+    } catch (error) {
+      const message =
+        error instanceof Error ? `${error.name}: ${error.message}` : "Unknown analyzer error";
+      console.warn(
+        `[ollama] Falling back to heuristic project summary after ${Date.now() - startedAt}ms: ${message}`,
+      );
+      return this.options.fallbackAnalyzer.summarizeProject(input);
+    }
+  }
+
+  async brainstormProject(input: ProjectContextInput): Promise<BrainstormReport> {
+    const startedAt = Date.now();
+    try {
+      const content = await this.requestOllamaJsonContent(
+        this.buildBrainstormPrompt(input),
+        [
+          "You are an AI brainstorming partner inside a Discord bot.",
+          "Return exactly one JSON object and no markdown.",
+          "Help the user think better, not just more.",
+          "Be practical, concise, grounded, and specific.",
+          "Avoid generic filler and avoid follow-up questions unless absolutely necessary.",
+        ].join(" "),
+      );
+      const parsed = parseModelJson(content);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Brainstorm response was not an object.");
+      }
+      return normalizeBrainstorm(brainstormSchema.parse(parsed));
+    } catch (error) {
+      const message =
+        error instanceof Error ? `${error.name}: ${error.message}` : "Unknown analyzer error";
+      console.warn(
+        `[ollama] Falling back to heuristic brainstorm after ${Date.now() - startedAt}ms: ${message}`,
+      );
+      return this.options.fallbackAnalyzer.brainstormProject(input);
+    }
+  }
+
   async suggestProjectBrain(
     input: ProjectBrainSuggestionInput,
   ): Promise<ProjectBrainSuggestionOutput> {
@@ -406,10 +521,11 @@ export class OllamaAnalyzer implements Analyzer {
         [
           "You improve project setup drafts for a Discord brainstorming bot.",
           "Return exactly one JSON object and no markdown.",
-          "Only suggest fields that are missing or weak.",
+          "For fields the user already filled, rewrite them more clearly while preserving meaning.",
+          "For missing or weak fields, provide short practical fill-ins.",
           "Use short, practical suggestions.",
           "Never invent hard facts such as confirmed deadlines, repositories, or exact tech stacks.",
-          "Set already-provided fields to empty string or empty array instead of rewriting them.",
+          "Do not add 'suggestion:' labels or commentary inside field values.",
         ].join(" "),
       );
       const parsed = parseModelJson(content);
@@ -643,7 +759,7 @@ export class OllamaAnalyzer implements Analyzer {
       "description, mainGoal, targetUsers, problemsSolved, ideas, constraints, techStack, decisions, notes",
       "Rules:",
       "- Use plain strings and arrays of strings only.",
-      "- If the user already provided a field, return an empty string or empty array for that field.",
+      "- If the user already provided a field, rewrite it more clearly while preserving the same meaning.",
       "- Keep suggestions concise, practical, and safe to mark as suggestions.",
       "- Do not invent exact deadlines, repositories, metrics, or confirmed technologies.",
       "",
@@ -657,6 +773,89 @@ export class OllamaAnalyzer implements Analyzer {
       `Tech stack: ${input.userInput.techStack.join("; ") || "missing"}`,
       `Decisions: ${input.userInput.decisions.join("; ") || "missing"}`,
       `Notes: ${input.userInput.notes || "missing"}`,
+    ].join("\n");
+  }
+
+  private buildProjectSummaryPrompt(input: ProjectContextInput): string {
+    const messageLines = input.messages
+      .slice(-30)
+      .map(
+        (message, index) =>
+          `${index + 1}. [${message.timestamp}] ${message.authorId}: ${message.content}`,
+      )
+      .join("\n");
+    const memoryLines = input.relevantPastContext
+      .slice(-8)
+      .map((item, index) => `${index + 1}. ${item.content}`)
+      .join("\n");
+
+    return [
+      "Return one JSON object with these keys:",
+      "currentDirection, importantThemes, recentChanges, openIssues, currentNextFocus, relevantPastContext, repoObservations",
+      "Rules:",
+      "- Use plain strings and arrays of strings only.",
+      "- Summarize the project state, not a brainstorming session.",
+      "- Mention recent discussion when it materially changes the state of the project.",
+      "- Keep each item concise and Discord-friendly.",
+      "",
+      `Project: ${input.project.name}`,
+      `Description: ${input.project.description ?? "N/A"}`,
+      `Linked repository: ${input.project.linkedRepoUrl ?? "N/A"}`,
+      `Brain description: ${input.project.brain?.description?.value ?? "N/A"}`,
+      `Brain goal: ${input.project.brain?.mainGoal?.value ?? "N/A"}`,
+      `Brain ideas: ${input.project.brain?.ideas?.value?.join("; ") ?? "N/A"}`,
+      `Brain constraints: ${input.project.brain?.constraints?.value?.join("; ") ?? "N/A"}`,
+      `Brain tech stack: ${input.project.brain?.techStack?.value?.join("; ") ?? "N/A"}`,
+      `Brain decisions: ${input.project.brain?.decisions?.value?.join("; ") ?? "N/A"}`,
+      `Brain notes: ${input.project.brain?.notes?.value ?? "N/A"}`,
+      "",
+      "Recent discussion:",
+      messageLines || "No recent discussion captured.",
+      "",
+      "Relevant past context:",
+      memoryLines || "No prior project memory.",
+    ].join("\n");
+  }
+
+  private buildBrainstormPrompt(input: ProjectContextInput): string {
+    const messageLines = input.messages
+      .slice(-30)
+      .map(
+        (message, index) =>
+          `${index + 1}. [${message.timestamp}] ${message.authorId}: ${message.content}`,
+      )
+      .join("\n");
+    const memoryLines = input.relevantPastContext
+      .slice(-8)
+      .map((item, index) => `${index + 1}. ${item.content}`)
+      .join("\n");
+
+    return [
+      "Return one JSON object with these keys:",
+      "coreIdeas, variationsTwists, gapsRisks, nextSteps, assumptions, repoObservations",
+      "Rules:",
+      "- Use plain strings and arrays of strings only.",
+      "- Provide 3-7 coreIdeas, 2-4 variationsTwists, concise gapsRisks, and actionable nextSteps.",
+      "- Do not ask follow-up questions unless absolutely necessary.",
+      "- Avoid generic advice and avoid repeating the user's input verbatim.",
+      "- Keep the response grounded and practical.",
+      "",
+      `Project: ${input.project.name}`,
+      `Description: ${input.project.description ?? "N/A"}`,
+      `Linked repository: ${input.project.linkedRepoUrl ?? "N/A"}`,
+      `Brain goal: ${input.project.brain?.mainGoal?.value ?? "N/A"}`,
+      `Brain ideas: ${input.project.brain?.ideas?.value?.join("; ") ?? "N/A"}`,
+      `Brain constraints: ${input.project.brain?.constraints?.value?.join("; ") ?? "N/A"}`,
+      `Brain tech stack: ${input.project.brain?.techStack?.value?.join("; ") ?? "N/A"}`,
+      `Brain decisions: ${input.project.brain?.decisions?.value?.join("; ") ?? "N/A"}`,
+      `Brain notes: ${input.project.brain?.notes?.value ?? "N/A"}`,
+      `Current user input: ${input.currentInput?.trim() || "none provided"}`,
+      "",
+      "Recent discussion:",
+      messageLines || "No recent discussion captured.",
+      "",
+      "Relevant past context:",
+      memoryLines || "No prior project memory.",
     ].join("\n");
   }
 }

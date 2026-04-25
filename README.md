@@ -8,7 +8,8 @@ Discord bot for project brainstorming sessions with:
 - Multi-project management
 - Project-based activation
 - Per-project session capture
-- On-demand session summaries
+- On-demand project summaries
+- On-demand brainstorming from project context
 - Per-project memory across sessions
 - Optional repository metadata linking
 
@@ -16,13 +17,16 @@ This bot is scoped as a brainstorming analyzer, not a coding agent.
 
 ## Commands
 
-- `/project create name guided-setup`
+- `/project create name`
 - `/project list`
 - `/project select project` (exact name)
 - `/project exit`
 - `/project brain`
+- `/project edit field`
+- `/project refine`
 - `/project memory`
-- `/session summarize`
+- `/project summary`
+- `/brainstorm`
 - `/attach-repo url`
 - `/forget-project project` (exact name)
 - `/forget-all-projects confirm:true`
@@ -31,19 +35,17 @@ This bot is scoped as a brainstorming analyzer, not a coding agent.
 
 1. Create or select a project.
 2. Once a project is active, ThinkBot can capture project-relevant chat in that scope when message content intent is enabled.
-3. Use `/session summarize` any time you want a structured summary of the recent discussion.
-4. Use `/project exit` to leave the current project and stop project-aware behavior.
+3. Use `/project summary` any time you want a structured summary of the current project state, including recent discussion.
+4. Use `/brainstorm` when you want fresh ideas based on the current project, linked repo, and recent discussion.
+5. Use `/project exit` to leave the current project and stop project-aware behavior.
 
 If no project is active, the bot stays passive outside explicit commands.
 
 ## Guided project setup
 
-`/project create` now starts with two inline fields:
-- `name`
-- `guided-setup` (`true` or `false`)
+`/project create` now always opens the guided setup flow after you provide the project name.
 
-If `guided-setup` is `true`, ThinkBot opens the guided setup questions.
-If `guided-setup` is `false`, it creates the project immediately and makes it active.
+The setup is required. After you submit the basics modal, ThinkBot gives you a one-tap `Continue setup` button that opens the details modal. This is the shortest Discord-supported flow because modal submissions cannot open another modal directly.
 
 The flow collects:
 - project name
@@ -62,6 +64,14 @@ You can leave fields blank. ThinkBot will suggest reasonable values for skipped 
 - edit your answers before saving
 
 Saved projects now keep a structured project brain with source metadata so later features can distinguish direct user input from AI-suggested setup fields.
+
+## Project brain
+
+- `/project brain` shows the structured project brain, including which values are AI-suggested.
+- `/project edit field` opens a modal to update one field directly.
+- `/project refine` suggests improvements for missing or weak fields without overwriting strong user-provided fields.
+
+When you apply refinement suggestions, ThinkBot keeps strong user-entered fields unchanged and only fills or improves weaker parts of the project brain.
 
 ## Quick start
 

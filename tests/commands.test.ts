@@ -6,7 +6,7 @@ describe("commandBuilders", () => {
     const commandNames = commandBuilders.map((builder) => builder.name);
 
     expect(commandNames).toContain("project");
-    expect(commandNames).toContain("session");
+    expect(commandNames).toContain("brainstorm");
     expect(commandNames).toContain("attach-repo");
   });
 
@@ -22,35 +22,31 @@ describe("commandBuilders", () => {
     expect(commandNames).not.toContain("end-session");
   });
 
-  it("includes the expected project and session subcommands", () => {
+  it("includes the expected project subcommands", () => {
     const projectCommand = commandBuilders.find((builder) => builder.name === "project");
-    const sessionCommand = commandBuilders.find((builder) => builder.name === "session");
 
     const projectSubcommands =
       projectCommand?.options?.map((option) => option.name).sort() ?? [];
-    const sessionSubcommands =
-      sessionCommand?.options?.map((option) => option.name).sort() ?? [];
 
     expect(projectSubcommands).toEqual([
       "brain",
       "create",
+      "edit",
       "exit",
       "list",
       "memory",
+      "refine",
       "select",
+      "summary",
     ]);
-    expect(sessionSubcommands).toEqual(["summarize"]);
   });
 
-  it("registers grouped project create with name and guided-setup fields", () => {
+  it("registers grouped project create with only the project name field", () => {
     const projectCommand = commandBuilders.find((builder) => builder.name === "project");
     const createSubcommand = projectCommand?.options?.find((option) => option.name === "create") as
       | { options?: Array<{ name?: string }> }
       | undefined;
 
-    expect(createSubcommand?.options?.map((option) => option.name) ?? []).toEqual([
-      "name",
-      "guided-setup",
-    ]);
+    expect(createSubcommand?.options?.map((option) => option.name) ?? []).toEqual(["name"]);
   });
 });

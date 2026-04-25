@@ -36,7 +36,7 @@ describe("ProjectSetupFlow", () => {
           decisions: [],
           notes: "",
         })),
-      } as Analyzer,
+      } as unknown as Analyzer,
     );
     const flow = new ProjectSetupFlow(engine);
     const showModal = vi.fn(async () => undefined);
@@ -65,11 +65,12 @@ describe("ProjectSetupFlow", () => {
     expect(byId("description")?.required).toBe(true);
     expect(byId("mainGoal")?.required).toBe(true);
     expect(byId("linkedRepoUrl")?.required).toBe(false);
-    expect(byId("description")?.placeholder).toBe("Leave blank for AI suggestion.");
+    expect(byId("description")?.placeholder).toBe("Describe the project in your own words.");
+    expect(byId("mainGoal")?.placeholder).toBe("What should this project accomplish?");
     expect(byId("linkedRepoUrl")?.placeholder).toBe("Optional. Leave blank if none.");
   });
 
-  it("marks only tech stack as required in details and shows AI-suggestion placeholders", async () => {
+  it("submitting basics returns a one-tap continue button for details", async () => {
     const engine = new BrainstormingEngine(
       new JsonStore(storePath),
       {
@@ -85,29 +86,44 @@ describe("ProjectSetupFlow", () => {
           decisions: [],
           notes: "",
         })),
-      } as Analyzer,
+      } as unknown as Analyzer,
     );
     const flow = new ProjectSetupFlow(engine);
 
-    await flow.handleModalSubmit(
-      {
-        customId: "project-setup:basics",
-        user: { id: "user-1" },
-        fields: {
-          getTextInputValue: (key: string) =>
-            (
-              {
-                name: "ThinkBot",
-                linkedRepoUrl: "",
-                description: "Discord brainstorming bot",
-                mainGoal: "Help organize ideas",
-              } as Record<string, string>
-            )[key] ?? "",
-        },
-        reply: vi.fn(async () => undefined),
-      } as never,
-      "scope-1",
-    );
+    const reply = vi.fn(async () => undefined);
+    await expect(
+      flow.handleModalSubmit(
+        {
+          customId: "project-setup:basics",
+          user: { id: "user-1" },
+          fields: {
+            getTextInputValue: (key: string) =>
+              (
+                {
+                  name: "ThinkBot",
+                  linkedRepoUrl: "",
+                  description: "Discord brainstorming bot",
+                  mainGoal: "Help organize ideas",
+                } as Record<string, string>
+              )[key] ?? "",
+          },
+          reply,
+        } as never,
+        "scope-1",
+      ),
+    ).resolves.toBe(true);
+
+    expect(reply).toHaveBeenCalledTimes(1);
+    const payload = (
+      reply.mock.calls as unknown as Array<[{
+        content: string;
+        components: Array<{ toJSON: () => { components?: Array<Record<string, unknown>> } }>;
+      }]>
+    )[0]?.[0];
+    expect(payload?.content).toContain("Continue when you want to fill the project details");
+    const rows = payload?.components?.map((row) => row.toJSON()) ?? [];
+    const button = rows.flatMap((row) => row.components ?? []).find((component) => component.custom_id === "project-setup:continue");
+    expect(button?.label).toBe("Continue setup");
 
     const showModal = vi.fn(async () => undefined);
     await expect(
@@ -155,7 +171,7 @@ describe("ProjectSetupFlow", () => {
           decisions: [oversized],
           notes: oversized,
         })),
-      } as Analyzer,
+      } as unknown as Analyzer,
     );
     const flow = new ProjectSetupFlow(engine);
 
@@ -200,5 +216,82 @@ describe("ProjectSetupFlow", () => {
     expect(editReply).toHaveBeenCalledTimes(1);
     const response = (editReply.mock.calls as Array<[{ content: string }] | []>)[0]?.[0];
     expect(response?.content.length).toBeLessThanOrEqual(2000);
+  });
+
+  it("shows all final setup fields and rewrites user-entered basics without marking them suggested", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      {
+        analyze: vi.fn(),
+        suggestProjectBrain: vi.fn(async () => ({
+          description: "AI description",
+          mainGoal: "AI goal",
+          targetUsers: ["AI users"],
+          problemsSolved: ["AI problem"],
+          ideas: ["AI idea"],
+          constraints: ["AI constraint"],
+          techStack: ["AI stack"],
+          decisions: ["AI decision"],
+          notes: "AI notes",
+        })),
+      } as unknown as Analyzer,
+    );
+    const flow = new ProjectSetupFlow(engine);
+
+    await flow.handleModalSubmit(
+      {
+        customId: "project-setup:basics",
+        user: { id: "user-1" },
+        fields: {
+          getTextInputValue: (key: string) =>
+            (
+              {
+                name: "ThinkBot",
+                linkedRepoUrl: "https://github.com/example/thinkbot",
+                description: "User description",
+                mainGoal: "User goal",
+              } as Record<string, string>
+            )[key] ?? "",
+        },
+        reply: vi.fn(async () => undefined),
+      } as never,
+      "scope-1",
+    );
+
+    const deferReply = vi.fn(async () => undefined);
+    const editReply = vi.fn(async (_payload: { content: string }) => undefined);
+    await flow.handleModalSubmit(
+      {
+        customId: "project-setup:details",
+        user: { id: "user-1" },
+        fields: {
+          getTextInputValue: (key: string) =>
+            (
+              {
+                ideas: "",
+                constraints: "",
+                techStack: "web page",
+                decisions: "",
+                notes: "",
+              } as Record<string, string>
+            )[key] ?? "",
+        },
+        deferReply,
+        editReply,
+      } as never,
+      "scope-1",
+    );
+
+    const response = (editReply.mock.calls as Array<[{ content: string }] | []>)[0]?.[0]?.content ?? "";
+    expect(response).toContain("Description: AI description");
+    expect(response).toContain("Goal: AI goal");
+    expect(response).toContain("GitHub repo: https://github.com/example/thinkbot");
+    expect(response).toContain("Ideas: AI idea (suggested)");
+    expect(response).toContain("Constraints: AI constraint (suggested)");
+    expect(response).toContain("Tech stack: AI stack");
+    expect(response).toContain("Decisions: AI decision (suggested)");
+    expect(response).toContain("Notes: AI notes (suggested)");
+    expect(response).not.toContain("Description: AI description (suggested)");
+    expect(response).not.toContain("Goal: AI goal (suggested)");
   });
 });

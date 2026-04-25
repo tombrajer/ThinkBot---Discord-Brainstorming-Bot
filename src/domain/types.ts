@@ -6,6 +6,19 @@ export interface ProjectBrainField<T> {
   source: BrainFieldSource;
 }
 
+export type ProjectBrainFieldKey =
+  | "description"
+  | "mainGoal"
+  | "targetUsers"
+  | "problemsSolved"
+  | "ideas"
+  | "constraints"
+  | "techStack"
+  | "decisions"
+  | "notes";
+
+export type ProjectEditableFieldKey = ProjectBrainFieldKey | "linkedRepoUrl";
+
 export interface ProjectBrain {
   description?: ProjectBrainField<string>;
   mainGoal?: ProjectBrainField<string>;
@@ -129,7 +142,35 @@ export interface AnalysisInput {
   relevantPastContext: ProjectMemory[];
 }
 
+export interface ProjectContextInput {
+  project: Project;
+  messages: SessionMessage[];
+  relevantPastContext: ProjectMemory[];
+  currentInput?: string;
+}
+
+export interface ProjectSummaryReport {
+  currentDirection: string;
+  importantThemes: string[];
+  recentChanges: string[];
+  openIssues: string[];
+  currentNextFocus: string[];
+  relevantPastContext: string[];
+  repoObservations: string[];
+}
+
+export interface BrainstormReport {
+  coreIdeas: string[];
+  variationsTwists: string[];
+  gapsRisks: string[];
+  nextSteps: string[];
+  assumptions: string[];
+  repoObservations: string[];
+}
+
 export interface Analyzer {
   analyze(input: AnalysisInput): Promise<Omit<SessionReport, "id" | "sessionId">>;
+  summarizeProject(input: ProjectContextInput): Promise<ProjectSummaryReport>;
+  brainstormProject(input: ProjectContextInput): Promise<BrainstormReport>;
   suggestProjectBrain(input: ProjectBrainSuggestionInput): Promise<ProjectBrainSuggestionOutput>;
 }

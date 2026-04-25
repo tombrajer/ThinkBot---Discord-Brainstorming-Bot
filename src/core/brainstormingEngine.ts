@@ -5,17 +5,23 @@ import {
   ProjectBrain,
   ProjectBrainDraft,
   ProjectBrainDraftValues,
+  ProjectEditableFieldKey,
+  ProjectBrainFieldKey,
   ProjectMemory,
+  ProjectSummaryReport,
   Session,
   SessionMessage,
   SessionReport,
   StoreState,
+  BrainstormReport,
 } from "../domain/types.js";
 import {
+  buildRefinementSuggestionOutput,
   buildProjectBrainDraft,
   buildProjectBrainReview,
   getProjectDescription,
   normalizeProjectBrainDraftValues,
+  projectToBrainDraftValues,
 } from "../projectBrain/projectBrain.js";
 import { JsonStore } from "../storage/jsonStore.js";
 
@@ -90,7 +96,7 @@ export class BrainstormingEngine {
       },
     });
 
-    return buildProjectBrainDraft(normalizedInput, suggestions);
+    return buildProjectBrainDraft(normalizedInput, suggestions, true);
   }
 
   async createProjectFromDraft(
@@ -98,13 +104,107 @@ export class BrainstormingEngine {
     draft: ProjectBrainDraft,
     includeSuggestions: boolean,
   ): Promise<Project> {
-    const brain = buildProjectBrainReview(draft.input, draft.suggestions, includeSuggestions);
+    const brain = buildProjectBrainReview(
+      draft.input,
+      draft.suggestions,
+      includeSuggestions,
+      includeSuggestions,
+    );
     return this.createProject(scopeId, {
       name: draft.input.name,
       description: brain.description?.value ?? draft.input.description,
       brain,
       linkedRepoUrl: draft.input.linkedRepoUrl,
     });
+  }
+
+  async prepareProjectRefinement(scopeId: string, selector: string): Promise<ProjectBrainDraft> {
+    const project = await this.resolveProject(scopeId, selector);
+    const input = projectToBrainDraftValues(project);
+    const baseSuggestions = await this.analyzer.suggestProjectBrain({
+      projectName: input.name,
+      userInput: {
+        description: input.description,
+        mainGoal: input.mainGoal,
+        targetUsers: input.targetUsers,
+        problemsSolved: input.problemsSolved,
+        ideas: input.ideas,
+        constraints: input.constraints,
+        techStack: input.techStack,
+        decisions: input.decisions,
+        notes: input.notes,
+      },
+    });
+
+    return buildProjectBrainDraft(
+      input,
+      buildRefinementSuggestionOutput(project, baseSuggestions),
+      false,
+    );
+  }
+
+  async applyProjectRefinement(
+    scopeId: string,
+    selector: string,
+    draft: ProjectBrainDraft,
+  ): Promise<Project> {
+    return this.store.update((state) => {
+      const project = this.resolveProjectFromState(scopeId, selector, state.projects);
+      project.brain = draft.review;
+      project.description = draft.review.description?.value ?? project.description;
+      project.updatedAt = new Date().toISOString();
+      return project;
+    });
+  }
+
+  async updateProjectBrainField(
+    scopeId: string,
+    selector: string,
+    field: ProjectEditableFieldKey,
+    values: string[],
+  ): Promise<Project> {
+    return this.store.update((state) => {
+      const project = this.resolveProjectFromState(scopeId, selector, state.projects);
+      const nextValues = values.map((value) => value.trim()).filter(Boolean);
+
+      if (field === "linkedRepoUrl") {
+        project.linkedRepoUrl = nextValues[0] ?? undefined;
+        project.updatedAt = new Date().toISOString();
+        return project;
+      }
+
+      const currentBrain = project.brain ?? {};
+      const nextBrain: ProjectBrain = { ...currentBrain };
+      this.assignBrainField(nextBrain, field, nextValues);
+      project.brain = nextBrain;
+      project.description = nextBrain.description?.value ?? project.description;
+      project.updatedAt = new Date().toISOString();
+      return project;
+    });
+  }
+
+  private assignBrainField(
+    brain: ProjectBrain,
+    field: ProjectBrainFieldKey,
+    values: string[],
+  ) {
+    switch (field) {
+      case "targetUsers":
+      case "problemsSolved":
+      case "ideas":
+      case "constraints":
+      case "techStack":
+      case "decisions":
+        brain[field] = values.length > 0 ? { value: values, source: "user" } : undefined;
+        return;
+      case "description":
+      case "mainGoal":
+      case "notes": {
+        const nextValue = values[0];
+        brain[field] = nextValue ? { value: nextValue, source: "user" } : undefined;
+        return;
+      }
+    }
   }
 
   private ensureScopeState(state: StoreState, scopeId: string) {
@@ -163,6 +263,20 @@ export class BrainstormingEngine {
       status: "active",
       repoUsedFlag: false,
     };
+  }
+
+  private buildProjectContext(
+    state: StoreState,
+    scopeId: string,
+    channelId: string,
+  ): { project: Project; messages: SessionMessage[]; memories: ProjectMemory[] } {
+    const project = this.requireActiveProjectFromState(state, scopeId);
+    const session = this.findActiveSession(state, scopeId, channelId, project.id);
+    const messages = session
+      ? state.messages.filter((message) => message.sessionId === session.id)
+      : [];
+    const memories = state.memories.filter((memory) => memory.projectId === project.id);
+    return { project, messages, memories };
   }
 
   private async ensureActiveSessionRecord(
@@ -359,6 +473,58 @@ export class BrainstormingEngine {
 
   async endSession(scopeId: string, channelId: string, requestedBy?: string): Promise<SessionReport> {
     return this.summarizeSession(scopeId, channelId, requestedBy ?? "legacy-command");
+  }
+
+  async summarizeProject(
+    scopeId: string,
+    channelId: string,
+    requestedBy: string,
+  ): Promise<ProjectSummaryReport> {
+    await this.ensureActiveSessionRecord(scopeId, channelId, requestedBy);
+    const state = await this.store.read();
+    const { project, messages, memories } = this.buildProjectContext(state, scopeId, channelId);
+    const summary = await this.analyzer.summarizeProject({
+      project,
+      messages,
+      relevantPastContext: memories,
+    });
+
+    await this.store.update((mutableState) => {
+      mutableState.memories.push({
+        id: randomUUID(),
+        projectId: project.id,
+        memoryType: "project_summary",
+        content: [
+          `Direction: ${summary.currentDirection}`,
+          `Themes: ${summary.importantThemes.join("; ")}`,
+          `Next focus: ${summary.currentNextFocus.join("; ")}`,
+          `Open issues: ${summary.openIssues.join("; ")}`,
+        ].join(" | "),
+        sourceSessionId:
+          this.findActiveSession(mutableState, scopeId, channelId, project.id)?.id ??
+          "project-summary",
+        createdAt: new Date().toISOString(),
+      });
+    });
+
+    return summary;
+  }
+
+  async brainstormProject(
+    scopeId: string,
+    channelId: string,
+    requestedBy: string,
+    currentInput?: string,
+  ): Promise<BrainstormReport> {
+    await this.ensureActiveSessionRecord(scopeId, channelId, requestedBy);
+    const state = await this.store.read();
+    const { project, messages, memories } = this.buildProjectContext(state, scopeId, channelId);
+    return this.analyzer.brainstormProject({
+      project,
+      messages,
+      relevantPastContext: memories,
+      currentInput,
+    });
   }
 
   async getProjectMemory(projectId: string): Promise<ProjectMemory[]> {

@@ -52,6 +52,8 @@ const DEFAULT_AI_PLACEHOLDER = "Leave blank for AI suggestion.";
 const OPTIONAL_REPO_PLACEHOLDER = "Optional. Leave blank if none.";
 const REQUIRED_TECH_STACK_PLACEHOLDER =
   "Required. Describe the product/platform; AI suggests the stack.";
+const DESCRIPTION_PLACEHOLDER = "Describe the project in your own words.";
+const MAIN_GOAL_PLACEHOLDER = "What should this project accomplish?";
 
 const withOptionalValue = (builder: TextInputBuilder, value: string): TextInputBuilder => {
   const trimmed = value.trim();
@@ -98,7 +100,7 @@ const buildBasicsModal = (values: ProjectBrainDraftValues): ModalBuilder => {
           .setLabel("What is the project about?")
           .setStyle(TextInputStyle.Paragraph)
           .setRequired(true)
-          .setPlaceholder(DEFAULT_AI_PLACEHOLDER),
+          .setPlaceholder(DESCRIPTION_PLACEHOLDER),
         values.description.slice(0, 4000),
       ),
     ),
@@ -109,7 +111,7 @@ const buildBasicsModal = (values: ProjectBrainDraftValues): ModalBuilder => {
           .setLabel("What is the main goal?")
           .setStyle(TextInputStyle.Paragraph)
           .setRequired(true)
-          .setPlaceholder(DEFAULT_AI_PLACEHOLDER),
+          .setPlaceholder(MAIN_GOAL_PLACEHOLDER),
         values.mainGoal.slice(0, 4000),
       ),
     ),
@@ -192,19 +194,6 @@ const buildDetailsModal = (values: ProjectBrainDraftValues): ModalBuilder => {
   return modal;
 };
 
-const buildContinueComponents = () => [
-  new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(CONTINUE_BUTTON_ID)
-      .setLabel("Continue setup")
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(CANCEL_BUTTON_ID)
-      .setLabel("Cancel")
-      .setStyle(ButtonStyle.Secondary),
-  ),
-];
-
 const buildReviewComponents = () => [
   new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
@@ -228,23 +217,45 @@ const buildReviewComponents = () => [
   ),
 ];
 
-const buildReviewSummary = (brain: ProjectBrain, name: string): string =>
+const buildContinueComponents = () => [
+  new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(CONTINUE_BUTTON_ID)
+      .setLabel("Continue setup")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(CANCEL_BUTTON_ID)
+      .setLabel("Cancel")
+      .setStyle(ButtonStyle.Secondary),
+  ),
+];
+
+const buildReviewSummaryFromDraft = (draft: Awaited<ReturnType<BrainstormingEngine["prepareProjectBrainDraft"]>>): string =>
   fitDiscordContent([
-    `Review project setup for ${name}`,
+    `Review project setup for ${draft.input.name}`,
     "Suggested fields are marked with `(suggested)`.",
     "",
-    `Goal: ${formatField(brain.mainGoal)}`,
-    `Key ideas: ${formatField(brain.ideas)}`,
-    `Tech stack: ${formatField(brain.techStack)}`,
+    `Description: ${formatField(draft.review.description)}`,
+    `Goal: ${formatField(draft.review.mainGoal)}`,
+    `GitHub repo: ${draft.input.linkedRepoUrl || "Not set."}`,
+    `Ideas: ${formatField(draft.review.ideas)}`,
+    `Constraints: ${formatField(draft.review.constraints)}`,
+    `Tech stack: ${formatField(draft.review.techStack)}`,
+    `Decisions: ${formatField(draft.review.decisions)}`,
+    `Notes: ${formatField(draft.review.notes)}`,
   ].join("\n"));
 
 const buildCreatedSummary = (project: Project): string =>
   fitDiscordContent([
     `Project created: ${project.name}`,
+    `Description: ${formatField(project.brain?.description)}`,
     `Goal: ${formatField(project.brain?.mainGoal)}`,
-    `Key ideas: ${formatField(project.brain?.ideas)}`,
-    `Tech stack: ${formatField(project.brain?.techStack)}`,
     `GitHub repo: ${project.linkedRepoUrl ?? "Not set."}`,
+    `Ideas: ${formatField(project.brain?.ideas)}`,
+    `Constraints: ${formatField(project.brain?.constraints)}`,
+    `Tech stack: ${formatField(project.brain?.techStack)}`,
+    `Decisions: ${formatField(project.brain?.decisions)}`,
+    `Notes: ${formatField(project.brain?.notes)}`,
     "",
     `Active project: ${project.name}`,
   ].join("\n"));
@@ -311,7 +322,7 @@ export class ProjectSetupFlow {
       this.drafts.set(this.key(scopeId, interaction.user.id), draft);
 
       await interaction.editReply({
-        content: buildReviewSummary(draft.review, draft.input.name),
+        content: buildReviewSummaryFromDraft(draft),
         components: buildReviewComponents(),
       });
       return true;

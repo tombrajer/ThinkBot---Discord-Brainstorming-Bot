@@ -1,8 +1,11 @@
 import {
   AnalysisInput,
   Analyzer,
+  BrainstormReport,
+  ProjectContextInput,
   ProjectBrainSuggestionInput,
   ProjectBrainSuggestionOutput,
+  ProjectSummaryReport,
 } from "../domain/types.js";
 
 const STOP_WORDS = new Set([
@@ -218,5 +221,96 @@ export class HeuristicAnalyzer implements Analyzer {
     input: ProjectBrainSuggestionInput,
   ): Promise<ProjectBrainSuggestionOutput> {
     return buildSuggestions(input);
+  }
+
+  async summarizeProject(input: ProjectContextInput): Promise<ProjectSummaryReport> {
+    const messageTexts = input.messages.map((message) => message.content.trim()).filter(Boolean);
+    const keywords = topKeywords([
+      input.project.name,
+      input.project.description ?? "",
+      ...messageTexts,
+    ]);
+    const memories = input.relevantPastContext
+      .slice(-4)
+      .map((memory) => memory.content.trim())
+      .filter(Boolean);
+    const recentDiscussion = messageTexts.slice(-4);
+    const nextFocus = [
+      input.project.brain?.mainGoal?.value,
+      input.project.brain?.ideas?.value?.[0],
+      recentDiscussion[0],
+    ]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => value.replace(/\s+/g, " ").trim());
+
+    return {
+      currentDirection:
+        input.project.brain?.mainGoal?.value ??
+        input.project.description ??
+        `Keep moving ${input.project.name} toward a sharper first version.`,
+      importantThemes:
+        keywords.length > 0
+          ? keywords.map((keyword) => `Theme: ${keyword}`)
+          : ["Theme: the project still needs clearer repeated priorities."],
+      recentChanges:
+        recentDiscussion.length > 0
+          ? recentDiscussion
+          : ["No recent discussion was captured for this project."],
+      openIssues: [
+        input.project.brain?.techStack?.value?.length
+          ? "The implementation direction exists, but tradeoffs are not fully narrowed."
+          : "The tech stack is still light on detail.",
+        "The current plan still needs one clearly prioritized next action.",
+      ],
+      currentNextFocus:
+        nextFocus.length > 0
+          ? nextFocus.slice(0, 3)
+          : ["Choose the smallest useful project milestone and define how to validate it."],
+      relevantPastContext:
+        memories.length > 0 ? memories : ["No prior project memory found yet."],
+      repoObservations: input.project.linkedRepoUrl
+        ? [`Repo linked: ${input.project.linkedRepoUrl}`]
+        : [],
+    };
+  }
+
+  async brainstormProject(input: ProjectContextInput): Promise<BrainstormReport> {
+    const messageTexts = input.messages.map((message) => message.content.trim()).filter(Boolean);
+    const keywords = topKeywords([
+      input.project.name,
+      input.project.description ?? "",
+      ...(input.project.brain?.ideas?.value ?? []),
+      ...messageTexts,
+      input.currentInput ?? "",
+    ]);
+    const topic = keywords[0] ?? input.project.name;
+    const secondaryTopic = keywords[1] ?? "workflow";
+    const repoObservation = input.project.linkedRepoUrl
+      ? [`Repo linked: ${input.project.linkedRepoUrl}`]
+      : [];
+
+    return {
+      coreIdeas: [
+        `Turn ${topic} into a narrow feature lane with one input, one visible output, and one stored result.`,
+        `Use project memory to surface repeated ${secondaryTopic} themes before users add more ideas.`,
+        `Add a lightweight review step that rewrites rough ideas into clearer, buildable options.`,
+      ],
+      variationsTwists: [
+        `Offer a critic pass that challenges the strongest ${topic} idea before implementation starts.`,
+        `Generate a “smallest test first” variant for each promising direction so the project stays grounded.`,
+      ],
+      gapsRisks: [
+        "Several ideas are still broad enough to drift without a narrower first version.",
+        "Repo-aware constraints are limited unless the linked codebase is explicitly summarized or inspected.",
+      ],
+      nextSteps: [
+        `Pick one ${topic} idea and define the smallest buildable slice.`,
+        "Write the acceptance criteria for that slice before adding more features.",
+      ],
+      assumptions: messageTexts.length === 0
+        ? ["Assuming the current project brain is more reliable than recent discussion because little discussion was captured."]
+        : ["Assuming recent discussion reflects the current priority of the active project."],
+      repoObservations: repoObservation,
+    };
   }
 }

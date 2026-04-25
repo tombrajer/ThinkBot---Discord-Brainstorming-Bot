@@ -10,12 +10,6 @@ export const commandBuilders = [
         .setDescription("Create a project")
         .addStringOption((opt) =>
           opt.setName("name").setDescription("Project name").setRequired(true),
-        )
-        .addBooleanOption((opt) =>
-          opt
-            .setName("guided-setup")
-            .setDescription("Open the guided setup questions")
-            .setRequired(true),
         ),
     )
     .addSubcommand((subcommand) =>
@@ -40,16 +34,38 @@ export const commandBuilders = [
       subcommand.setName("brain").setDescription("Show the current project context"),
     )
     .addSubcommand((subcommand) =>
+      subcommand
+        .setName("edit")
+        .setDescription("Edit one project brain field")
+        .addStringOption((opt) =>
+          opt
+            .setName("field")
+            .setDescription("Field to edit")
+            .setRequired(true)
+            .addChoices(
+              { name: "Description", value: "description" },
+              { name: "Goal", value: "mainGoal" },
+              { name: "Ideas", value: "ideas" },
+              { name: "Constraints", value: "constraints" },
+              { name: "Tech Stack", value: "techStack" },
+              { name: "Decisions", value: "decisions" },
+              { name: "Notes", value: "notes" },
+              { name: "GitHub Repo", value: "linkedRepoUrl" },
+            ),
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand.setName("refine").setDescription("Suggest improvements for weak or missing project fields"),
+    )
+    .addSubcommand((subcommand) =>
       subcommand.setName("memory").setDescription("Show recent project memory"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand.setName("summary").setDescription("Summarize the current project state"),
     ),
   new SlashCommandBuilder()
-    .setName("session")
-    .setDescription("Session commands")
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("summarize")
-        .setDescription("Summarize recent discussion for the active project"),
-    ),
+    .setName("brainstorm")
+    .setDescription("Brainstorm from the active project, repo, and recent discussion"),
   new SlashCommandBuilder()
     .setName("attach-repo")
     .setDescription("Attach repository URL to current project")

@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrainstormingEngine } from "../src/core/brainstormingEngine.js";
 import { JsonStore } from "../src/storage/jsonStore.js";
 import { HeuristicAnalyzer } from "../src/analysis/heuristicAnalyzer.js";
+import { Analyzer } from "../src/domain/types.js";
 
 describe("BrainstormingEngine", () => {
   let tempDir: string;
@@ -99,7 +100,7 @@ describe("BrainstormingEngine", () => {
     expect(project.brain?.targetUsers?.source).toBe("ai-suggested");
   });
 
-  it("builds a reviewed project draft and saves skipped fields as ai-suggested", async () => {
+  it("builds a reviewed project draft and rewrites user-filled setup fields without marking them suggested", async () => {
     const engine = new BrainstormingEngine(
       new JsonStore(storePath),
       new HeuristicAnalyzer(),
@@ -121,14 +122,94 @@ describe("BrainstormingEngine", () => {
 
     expect(draft.suggestions.mainGoal).toBeTruthy();
     expect(draft.review.mainGoal?.source).toBe("ai-suggested");
-    expect(draft.review.techStack?.source).toBe("ai-suggested");
+    expect(draft.review.description?.source).toBe("user");
+    expect(draft.review.description?.value).toContain("ThinkBot");
+    expect(draft.review.techStack?.source).toBe("user");
     expect(draft.review.techStack?.value.length).toBeGreaterThan(0);
 
     const project = await engine.createProjectFromDraft("guild-1", draft, true);
 
     expect(project.brain?.mainGoal?.source).toBe("ai-suggested");
-    expect(project.brain?.description?.source).toBe("ai-suggested");
+    expect(project.brain?.description?.source).toBe("user");
     expect(project.description).toContain("ThinkBot");
+  });
+
+  it("updates one project brain field as user-provided data", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      new HeuristicAnalyzer(),
+    );
+
+    const project = await engine.createProject("guild-1", {
+      name: "ThinkBot",
+      linkedRepoUrl: "https://github.com/example/thinkbot",
+      brain: {
+        mainGoal: { value: "Keep brainstorming structured", source: "ai-suggested" },
+      },
+    });
+
+    const updated = await engine.updateProjectBrainField("guild-1", project.id, "mainGoal", [
+      "Make project planning actionable",
+    ]);
+
+    expect(updated.brain?.mainGoal?.value).toBe("Make project planning actionable");
+    expect(updated.brain?.mainGoal?.source).toBe("user");
+    expect(updated.linkedRepoUrl).toBe("https://github.com/example/thinkbot");
+  });
+
+  it("prepares refinement suggestions without overwriting strong user fields", async () => {
+    const analyzer: Analyzer = {
+      analyze: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      summarizeProject: vi.fn(async () => ({
+        currentDirection: "summary direction",
+        importantThemes: ["theme"],
+        recentChanges: ["change"],
+        openIssues: ["issue"],
+        currentNextFocus: ["focus"],
+        relevantPastContext: ["memory"],
+        repoObservations: [],
+      })),
+      brainstormProject: vi.fn(async () => ({
+        coreIdeas: ["idea"],
+        variationsTwists: ["twist"],
+        gapsRisks: ["risk"],
+        nextSteps: ["step"],
+        assumptions: [],
+        repoObservations: [],
+      })),
+      suggestProjectBrain: vi.fn(async () => ({
+        description: "AI description",
+        mainGoal: "AI goal",
+        targetUsers: ["AI users"],
+        problemsSolved: ["AI problem"],
+        ideas: ["AI idea"],
+        constraints: ["AI constraint"],
+        techStack: ["AI stack"],
+        decisions: ["AI decision"],
+        notes: "AI notes",
+      })),
+    };
+    const engine = new BrainstormingEngine(new JsonStore(storePath), analyzer);
+
+    const project = await engine.createProject("guild-1", {
+      name: "ThinkBot",
+      brain: {
+        description: { value: "User description with enough detail to stay strong", source: "user" },
+        mainGoal: { value: "User goal with enough detail to remain strong", source: "user" },
+        ideas: { value: ["User idea"], source: "user" },
+      },
+    });
+
+    const draft = await engine.prepareProjectRefinement("guild-1", project.id);
+
+    expect(draft.review.description?.value).toBe("User description with enough detail to stay strong");
+    expect(draft.review.description?.source).toBe("user");
+    expect(draft.review.mainGoal?.value).toBe("User goal with enough detail to remain strong");
+    expect(draft.review.mainGoal?.source).toBe("user");
+    expect(draft.review.techStack?.value).toEqual(["AI stack"]);
+    expect(draft.review.techStack?.source).toBe("ai-suggested");
   });
 
   it("runs session lifecycle and stores report + memory", async () => {
@@ -211,6 +292,58 @@ describe("BrainstormingEngine", () => {
 
     const memory = await engine.getProjectMemory(project.id);
     expect(memory.length).toBeGreaterThan(0);
+  });
+
+  it("builds a project summary without ending the active session", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      new HeuristicAnalyzer(),
+    );
+
+    const project = await engine.createProject("guild-1", {
+      name: "Project Summary",
+      description: "desc",
+      linkedRepoUrl: "https://github.com/example/project-summary",
+    });
+    await engine.selectProject("guild-1", project.id);
+
+    await engine.captureMessage("guild-1", "channel-1", "user-1", "We shifted toward a tighter MVP.");
+    const originalSession = await engine.getActiveSession("guild-1", "channel-1");
+
+    const report = await engine.summarizeProject("guild-1", "channel-1", "user-1");
+
+    expect(report.currentDirection.length).toBeGreaterThan(0);
+    expect(report.recentChanges.length).toBeGreaterThan(0);
+
+    const activeSession = await engine.getActiveSession("guild-1", "channel-1");
+    expect(activeSession?.id).toBe(originalSession?.id);
+    expect(activeSession?.status).toBe("active");
+
+    const memory = await engine.getProjectMemory(project.id);
+    expect(memory.some((item) => item.memoryType === "project_summary")).toBe(true);
+  });
+
+  it("brainstorms from the active project without requiring explicit input", async () => {
+    const engine = new BrainstormingEngine(
+      new JsonStore(storePath),
+      new HeuristicAnalyzer(),
+    );
+
+    const project = await engine.createProject("guild-1", {
+      name: "Brainstorm Test",
+      description: "Discord idea assistant",
+      brain: {
+        mainGoal: { value: "Generate better ideas from project context", source: "user" },
+      },
+    });
+    await engine.selectProject("guild-1", project.id);
+    await engine.captureMessage("guild-1", "channel-1", "user-1", "Need a clearer MVP flow.");
+
+    const report = await engine.brainstormProject("guild-1", "channel-1", "user-1");
+
+    expect(report.coreIdeas.length).toBeGreaterThan(0);
+    expect(report.variationsTwists.length).toBeGreaterThan(0);
+    expect(report.nextSteps.length).toBeGreaterThan(0);
   });
 
   it("clears the active project when exiting project mode", async () => {

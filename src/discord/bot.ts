@@ -8,7 +8,9 @@ import {
 } from "discord.js";
 import { BrainstormingEngine } from "../core/brainstormingEngine.js";
 import { ProjectSetupFlow } from "./projectSetupFlow.js";
-import { formatReport } from "../report/formatReport.js";
+import { ProjectBrainFlow } from "./projectBrainFlow.js";
+import { Project, ProjectBrainField, ProjectEditableFieldKey } from "../domain/types.js";
+import { formatBrainstormReport, formatProjectSummary } from "../report/formatProjectOutput.js";
 
 const scopeFor = (guildId: string | null, userId: string): string => guildId ?? `dm:${userId}`;
 const MAX_DISCORD_CONTENT_LENGTH = 2_000;
@@ -91,15 +93,30 @@ const replyWithChunks = async (
   }
 };
 
+const formatBrainField = (field?: ProjectBrainField<string | string[]>): string => {
+  if (!field) {
+    return "Not set.";
+  }
+
+  const value = Array.isArray(field.value) ? field.value.join(", ") : field.value;
+  return `${value}${field.source === "ai-suggested" ? " (suggested)" : ""}`;
+};
+
 const buildProjectBrainContent = (
-  project: { name: string; description?: string; linkedRepoUrl?: string },
+  project: Project,
   memory: { content: string }[],
 ): string => {
   const recentMemory = memory.slice(-5).map((item) => `- ${item.content}`);
 
   return [
     `Project: ${project.name}`,
-    `Description: ${project.description ?? "Not set."}`,
+    `Description: ${formatBrainField(project.brain?.description)}`,
+    `Goal: ${formatBrainField(project.brain?.mainGoal)}`,
+    `Ideas: ${formatBrainField(project.brain?.ideas)}`,
+    `Constraints: ${formatBrainField(project.brain?.constraints)}`,
+    `Tech stack: ${formatBrainField(project.brain?.techStack)}`,
+    `Decisions: ${formatBrainField(project.brain?.decisions)}`,
+    `Notes: ${formatBrainField(project.brain?.notes)}`,
     `Repo: ${project.linkedRepoUrl ?? "Not attached."}`,
     "",
     "Recent memory:",
@@ -107,7 +124,7 @@ const buildProjectBrainContent = (
   ].join("\n");
 };
 
-const summarizeActiveDiscussion = async (
+const summarizeCurrentProject = async (
   interaction: ChatInputCommandInteraction,
   engine: BrainstormingEngine,
   scopeId: string,
@@ -119,19 +136,46 @@ const summarizeActiveDiscussion = async (
 
   const startMs = Date.now();
   console.info(
-    `[discord] summarize start scope=${scopeId} channel=${interaction.channelId} user=${interaction.user.id}`,
+    `[discord] project-summary start scope=${scopeId} channel=${interaction.channelId} user=${interaction.user.id}`,
   );
   await interaction.deferReply();
 
-  const report = await engine.summarizeSession(scopeId, interaction.channelId, interaction.user.id);
-  const formatted = formatReport(report);
+  const report = await engine.summarizeProject(scopeId, interaction.channelId, interaction.user.id);
+  const formatted = formatProjectSummary(report);
   const contentChunks = chunkMessage(formatted);
 
-  await interaction.editReply(`Summary ready for ${project.name}. Sending report...`);
+  await interaction.editReply(`Project summary ready for ${project.name}. Sending report...`);
   for (let index = 0; index < contentChunks.length; index += 1) {
     await interaction.followUp(contentChunks[index]);
   }
-  console.info(`[discord] summarize completed in ${Date.now() - startMs}ms`);
+  console.info(`[discord] project-summary completed in ${Date.now() - startMs}ms`);
+};
+
+const brainstormCurrentProject = async (
+  interaction: ChatInputCommandInteraction,
+  engine: BrainstormingEngine,
+  scopeId: string,
+) => {
+  const project = await engine.getActiveProject(scopeId);
+  if (!project) {
+    throw new Error("No active project selected.");
+  }
+
+  const startMs = Date.now();
+  console.info(
+    `[discord] brainstorm start scope=${scopeId} channel=${interaction.channelId} user=${interaction.user.id}`,
+  );
+  await interaction.deferReply();
+
+  const report = await engine.brainstormProject(scopeId, interaction.channelId, interaction.user.id);
+  const formatted = formatBrainstormReport(report);
+  const contentChunks = chunkMessage(formatted);
+
+  await interaction.editReply(`Brainstorm ready for ${project.name}. Sending ideas...`);
+  for (let index = 0; index < contentChunks.length; index += 1) {
+    await interaction.followUp(contentChunks[index]);
+  }
+  console.info(`[discord] brainstorm completed in ${Date.now() - startMs}ms`);
 };
 
 export const createDiscordBot = (
@@ -152,6 +196,7 @@ export const createDiscordBot = (
     intents,
   });
   const projectSetupFlow = new ProjectSetupFlow(engine);
+  const projectBrainFlow = new ProjectBrainFlow(engine);
 
   client.on(Events.ClientReady, () => {
     console.log(
@@ -234,11 +279,21 @@ export const createDiscordBot = (
           if (handled) {
             return;
           }
+
+          const brainHandled = await projectBrainFlow.handleModalSubmit(interaction, scopeId);
+          if (brainHandled) {
+            return;
+          }
         }
 
         if (interaction.isButton()) {
           const handled = await projectSetupFlow.handleButton(interaction, scopeId);
           if (handled) {
+            return;
+          }
+
+          const brainHandled = await projectBrainFlow.handleButton(interaction, scopeId);
+          if (brainHandled) {
             return;
           }
         }
@@ -248,26 +303,11 @@ export const createDiscordBot = (
 
       const projectSubcommand =
         interaction.commandName === "project" ? interaction.options.getSubcommand() : undefined;
-      const sessionSubcommand =
-        interaction.commandName === "session" ? interaction.options.getSubcommand() : undefined;
-
       if (
         interaction.commandName === "project" && projectSubcommand === "create"
       ) {
         const name = interaction.options.getString("name", true);
-        const guidedSetup = interaction.options.getBoolean("guided-setup", true);
-
-        if (guidedSetup) {
-          await projectSetupFlow.showBasicsModal(interaction, scopeId, name);
-          return;
-        }
-
-        const project = await engine.createProject(scopeId, { name });
-        const activeProject = await engine.getActiveProject(scopeId);
-        await interaction.reply({
-          content: `Project created: ${project.name}. ${formatActiveProject(activeProject?.name)}`,
-          flags: MessageFlags.Ephemeral,
-        });
+        await projectSetupFlow.showBasicsModal(interaction, scopeId, name);
         return;
       }
 
@@ -338,8 +378,24 @@ export const createDiscordBot = (
         return;
       }
 
-      if (interaction.commandName === "session" && sessionSubcommand === "summarize") {
-        await summarizeActiveDiscussion(interaction, engine, scopeId);
+      if (interaction.commandName === "project" && projectSubcommand === "edit") {
+        const field = interaction.options.getString("field", true) as ProjectEditableFieldKey;
+        await projectBrainFlow.showEditModal(interaction, scopeId, field);
+        return;
+      }
+
+      if (interaction.commandName === "project" && projectSubcommand === "refine") {
+        await projectBrainFlow.showRefineReview(interaction, scopeId);
+        return;
+      }
+
+      if (interaction.commandName === "project" && projectSubcommand === "summary") {
+        await summarizeCurrentProject(interaction, engine, scopeId);
+        return;
+      }
+
+      if (interaction.commandName === "brainstorm") {
+        await brainstormCurrentProject(interaction, engine, scopeId);
         return;
       }
 

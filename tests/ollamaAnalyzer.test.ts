@@ -53,6 +53,23 @@ const makeFallbackAnalyzer = () => {
   };
 
   const analyze = vi.fn(async () => fallbackReport);
+  const summarizeProject = vi.fn(async () => ({
+    currentDirection: "Fallback direction",
+    importantThemes: ["Fallback theme"],
+    recentChanges: ["Fallback change"],
+    openIssues: ["Fallback issue"],
+    currentNextFocus: ["Fallback focus"],
+    relevantPastContext: ["Fallback memory"],
+    repoObservations: [],
+  }));
+  const brainstormProject = vi.fn(async () => ({
+    coreIdeas: ["Fallback idea"],
+    variationsTwists: ["Fallback twist"],
+    gapsRisks: ["Fallback risk"],
+    nextSteps: ["Fallback step"],
+    assumptions: [],
+    repoObservations: [],
+  }));
   const suggestProjectBrain = vi.fn(
     async (_input: ProjectBrainSuggestionInput): Promise<ProjectBrainSuggestionOutput> => ({
       description: "",
@@ -66,7 +83,7 @@ const makeFallbackAnalyzer = () => {
       notes: "",
     }),
   );
-  const analyzer: Analyzer = { analyze, suggestProjectBrain };
+  const analyzer: Analyzer = { analyze, summarizeProject, brainstormProject, suggestProjectBrain };
   return { analyzer, analyze, fallbackReport };
 };
 
